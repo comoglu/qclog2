@@ -1,0 +1,26 @@
+# Private / internal
+CLAUDE.md
+NOTES.md
+
+# Site-specific config (copy config.example.json → config.json and edit)
+config.json
+
+# Database and generated output
+*.db
+*.db-wal
+*.db-shm
+qc_current.json
+qc_24h.json
+qc_7d.json
+health.json
+
+# Temp files
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc

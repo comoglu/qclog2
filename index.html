@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QC Log</title>
+  <link rel="stylesheet" href="vendor/leaflet.css">
+  <link rel="stylesheet" href="vendor/MarkerCluster.css">
+  <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="vendor/uplot.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── HEADER ─────────────────────────────────────────── -->
+  <header id="hdr">
+    <div class="hdr-left">
+      <span class="app-name">QC Log</span>
+      <span id="conn-badge" class="badge badge-connecting">Loading…</span>
+    </div>
+    <div class="hdr-center">
+      <input id="search" type="search" placeholder="Search stream / station…" autocomplete="off">
+      <select id="filter-net"><option value="">All Networks</option></select>
+      <select id="filter-param">
+        <option value="">All Parameters</option>
+        <option value="availability">Availability</option>
+        <option value="delay">Delay</option>
+        <option value="latency">Latency</option>
+        <option value="timing_quality">Timing Quality</option>
+        <option value="rms">RMS</option>
+        <option value="offset">Offset</option>
+        <option value="gaps_count">Gaps</option>
+        <option value="overlaps_count">Overlaps</option>
+        <option value="spikes_count">Spikes</option>
+      </select>
+      <select id="filter-status">
+        <option value="">All Status</option>
+        <option value="ok">OK</option>
+        <option value="warn">Warning</option>
+        <option value="alert">Alert</option>
+        <option value="nodata">No data</option>
+      </select>
+      <button id="watchlist-only-btn" title="Show watchlisted streams only">☆ Watchlist</button>
+    </div>
+    <div class="hdr-right">
+      <label class="hdr-label">Refresh
+        <select id="refresh-sel">
+          <option value="30000">30 s</option>
+          <option value="60000" selected>60 s</option>
+          <option value="120000">2 min</option>
+        </select>
+      </label>
+      <button id="refresh-now" title="Refresh now">⟳</button>
+      <button id="export-csv" title="Export CSV">↓ CSV</button>
+      <button id="notif-toggle" title="Enable browser notifications">🔔</button>
+      <button id="settings-btn" title="Settings">⚙</button>
+      <button id="theme-toggle" title="Toggle dark/light mode">◑</button>
+    </div>
+  </header>
+
+  <!-- ── STATUS BAR ─────────────────────────────────────── -->
+  <div id="status-bar">
+    <div id="status-counts"></div>
+    <div id="net-breakdown"></div>
+    <div id="last-update-text"></div>
+  </div>
+
+  <!-- ── TABS ───────────────────────────────────────────── -->
+  <nav id="tabs">
+    <button class="tab active" data-view="table">Table</button>
+    <button class="tab" data-view="grid">Grid</button>
+    <button class="tab" data-view="map">Map</button>
+    <button class="tab" data-view="history">History</button>
+    <button class="tab" data-view="compare">Overlay</button>
+    <button class="tab" data-view="heatmap">Heatmap</button>
+    <button class="tab" data-view="events">Events <span id="events-badge" class="ev-badge" style="display:none"></span></button>
+    <span id="tab-stats"></span>
+  </nav>
+
+  <!-- ── MAIN ───────────────────────────────────────────── -->
+  <div id="main-wrap">
+    <div id="content">
+
+      <!-- TABLE VIEW -->
+      <section id="view-table" class="view active">
+        <div id="table-scroll">
+          <table id="qc-table">
+            <thead id="qc-thead"></thead>
+            <tbody id="qc-tbody"></tbody>
+          </table>
+          <div id="tbl-empty" class="empty-state" style="display:none">
+            No streams match the current filters.
+          </div>
+        </div>
+      </section>
+
+      <!-- GRID VIEW -->
+      <section id="view-grid" class="view">
+        <div id="grid-wrap"></div>
+      </section>
+
+      <!-- MAP VIEW -->
+      <section id="view-map" class="view">
+        <div id="map"></div>
+      </section>
+
+      <!-- HISTORY VIEW -->
+      <section id="view-history" class="view">
+        <div id="history-wrap">
+          <div id="history-controls">
+            <div class="hist-control-row">
+              <label class="hist-label">Stream
+                <select id="hist-stream">
+                  <option value="">Select stream…</option>
+                </select>
+              </label>
+              <label class="hist-label">Parameter
+                <select id="hist-param">
+                  <option value="availability">Availability</option>
+                  <option value="delay">Delay</option>
+                  <option value="latency">Latency</option>
+                  <option value="timing_quality">Timing Quality</option>
+                  <option value="rms">RMS</option>
+                  <option value="offset">Offset</option>
+                  <option value="gaps_count">Gaps</option>
+                  <option value="overlaps_count">Overlaps</option>
+                </select>
+              </label>
+              <div class="hist-label">Time range
+                <div class="time-range-btns">
+                  <button class="tr-btn" data-range="1h">1h</button>
+                  <button class="tr-btn" data-range="6h">6h</button>
+                  <button class="tr-btn active" data-range="24h">24h</button>
+                  <button class="tr-btn" data-range="7d">7d</button>
+                </div>
+              </div>
+              <button id="hist-load-btn" class="btn-primary">Load</button>
+            </div>
+          </div>
+          <div id="history-body">
+            <div id="history-chart-wrap"></div>
+            <div id="history-stats"></div>
+            <div id="history-table-wrap"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- OVERLAY VIEW -->
+      <section id="view-compare" class="view">
+        <div id="overlay-layout">
+
+          <!-- Left panel: stream selector -->
+          <div id="overlay-sidebar">
+            <div id="overlay-sidebar-top">
+              <div class="overlay-ctrl-row">
+                <label class="hist-label">Parameter
+                  <select id="cmp-param">
+                    <option value="availability">Availability</option>
+                    <option value="delay">Delay</option>
+                    <option value="latency">Latency</option>
+                    <option value="timing_quality">Timing Quality</option>
+                    <option value="rms">RMS</option>
+                    <option value="offset">Offset</option>
+                    <option value="gaps_count">Gaps</option>
+                    <option value="overlaps_count">Overlaps</option>
+                    <option value="spikes_count">Spikes</option>
+                  </select>
+                </label>
+                <label class="hist-label">Time range
+                  <div class="time-range-btns">
+                    <button class="tr-btn" data-range="1h">1h</button>
+                    <button class="tr-btn" data-range="6h">6h</button>
+                    <button class="tr-btn active" data-range="24h">24h</button>
+                    <button class="tr-btn" data-range="7d">7d</button>
+                  </div>
+                </label>
+              </div>
+              <div class="overlay-ctrl-row overlay-actions">
+                <input id="cmp-search" type="search" placeholder="Filter streams…" autocomplete="off">
+                <span id="cmp-stream-count" class="cmp-count"></span>
+              </div>
+              <div class="overlay-ctrl-row overlay-actions">
+                <button id="cmp-all-btn">All</button>
+                <button id="cmp-none-btn">None</button>
+                <button id="cmp-watched-btn">Watchlist</button>
+                <button id="cmp-top10-btn" title="Select 10 streams with worst current status">Top 10 worst</button>
+                <button id="cmp-load-btn" class="btn-primary">Plot</button>
+              </div>
+            </div>
+            <div id="cmp-stream-list"></div>
+          </div>
+
+          <!-- Right panel: chart -->
+          <div id="overlay-chart-panel">
+            <div id="cmp-chart-wrap"></div>
+            <div id="cmp-stats"></div>
+            <div id="cmp-legend"></div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- HEATMAP VIEW -->
+      <section id="view-heatmap" class="view">
+        <div id="heatmap-controls">
+          <div class="compare-ctrl-row">
+            <label class="hist-label">Parameter
+              <select id="hm-param">
+                <option value="availability">Availability</option>
+                <option value="delay">Delay</option>
+                <option value="latency">Latency</option>
+                <option value="timing_quality">Timing Quality</option>
+                <option value="rms">RMS</option>
+                <option value="offset">Offset</option>
+                <option value="gaps_count">Gaps</option>
+                <option value="overlaps_count">Overlaps</option>
+                <option value="spikes_count">Spikes</option>
+              </select>
+            </label>
+            <label class="hist-label">Time range
+              <div class="time-range-btns">
+                <button class="tr-btn active" data-range="24h">24h</button>
+                <button class="tr-btn" data-range="7d">7d</button>
+              </div>
+            </label>
+            <button id="hm-load-btn" class="btn-primary">Load</button>
+          </div>
+        </div>
+        <div id="heatmap-body">
+          <div id="heatmap-legend"></div>
+          <div id="heatmap-scroll">
+            <div id="heatmap-labels"></div>
+            <div id="heatmap-canvas-wrap">
+              <div id="heatmap-xaxis"></div>
+              <canvas id="heatmap-canvas"></canvas>
+            </div>
+          </div>
+          <div id="heatmap-tooltip" class="hm-tooltip" style="display:none"></div>
+
+        </div>
+      </section>
+
+      <!-- EVENTS VIEW -->
+      <section id="view-events" class="view">
+        <div id="events-controls">
+          <span id="events-info" class="ev-info"></span>
+          <button id="events-clear-btn">Clear log</button>
+        </div>
+        <div id="events-body">
+          <table id="events-table">
+            <thead><tr>
+              <th>Time (UTC)</th><th>Stream</th><th>From</th><th>To</th><th>Duration</th>
+            </tr></thead>
+            <tbody id="events-tbody"></tbody>
+          </table>
+          <div id="events-empty" class="empty-state">No state changes detected this session.<br>Events are recorded when a stream's overall status changes between refreshes.</div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ── CHART PANEL (Table / Grid views) ─────────────── -->
+    <aside id="chart-panel" class="panel-closed">
+      <div class="panel-hdr">
+        <div class="panel-hdr-left">
+          <span id="chart-title">Stream Detail</span>
+          <span id="chart-param-label" class="param-badge"></span>
+        </div>
+        <div class="panel-hdr-right">
+          <div class="time-range-btns">
+            <button class="tr-btn" data-range="1h">1h</button>
+            <button class="tr-btn" data-range="6h">6h</button>
+            <button class="tr-btn active" data-range="24h">24h</button>
+            <button class="tr-btn" data-range="7d">7d</button>
+          </div>
+          <button id="panel-close">✕</button>
+        </div>
+      </div>
+      <div id="chart-body">
+        <div id="chart-wrap"></div>
+        <div id="chart-stats"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ── FOOTER ─────────────────────────────────────────── -->
+  <footer id="footer">
+    <span id="footer-info"></span>
+    <span id="footer-countdown"></span>
+  </footer>
+
+  <!-- ── SETTINGS MODAL ─────────────────────────────────── -->
+  <div id="settings-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <div class="modal-hdr">
+        <span>Settings</span>
+        <button id="settings-close">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <div class="settings-section">
+          <div class="settings-section-title">Data Source</div>
+          <div class="conn-grid">
+            <label class="conn-label">QC JSON URL
+              <input type="text" id="cfg-url" placeholder="qc_current.json">
+            </label>
+            <label class="conn-label">FDSNWS base URL (for station coordinates &amp; names)
+              <input type="text" id="cfg-fdsnws" placeholder="http://localhost:8081/fdsnws">
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Thresholds</div>
+          <p class="thr-help">Colour cells outside these ranges. Leave blank to disable.</p>
+          <table class="thr-table">
+            <thead><tr><th>Parameter</th><th>Warning</th><th>Alert</th><th>Direction</th></tr></thead>
+            <tbody>
+              <tr><td>Availability (%)</td>
+                <td><input class="thr-input" id="thr-avail-warn"    type="number" placeholder="80"></td>
+                <td><input class="thr-input" id="thr-avail-alert"   type="number" placeholder="50"></td>
+                <td><span class="thr-dir">lower = worse</span></td></tr>
+              <tr><td>Delay (s)</td>
+                <td><input class="thr-input" id="thr-delay-warn"    type="number" placeholder="60"></td>
+                <td><input class="thr-input" id="thr-delay-alert"   type="number" placeholder="300"></td>
+                <td><span class="thr-dir">higher = worse</span></td></tr>
+              <tr><td>Latency (s)</td>
+                <td><input class="thr-input" id="thr-latency-warn"  type="number" placeholder="60"></td>
+                <td><input class="thr-input" id="thr-latency-alert" type="number" placeholder="300"></td>
+                <td><span class="thr-dir">higher = worse</span></td></tr>
+              <tr><td>Timing Quality (%)</td>
+                <td><input class="thr-input" id="thr-timing-warn"   type="number" placeholder="80"></td>
+                <td><input class="thr-input" id="thr-timing-alert"  type="number" placeholder="50"></td>
+                <td><span class="thr-dir">lower = worse</span></td></tr>
+              <tr><td>Gaps Count</td>
+                <td><input class="thr-input" id="thr-gaps-warn"     type="number" placeholder="1"></td>
+                <td><input class="thr-input" id="thr-gaps-alert"    type="number" placeholder="5"></td>
+                <td><span class="thr-dir">higher = worse</span></td></tr>
+              <tr><td>Overlaps Count</td>
+                <td><input class="thr-input" id="thr-overlaps-warn"  type="number" placeholder="1"></td>
+                <td><input class="thr-input" id="thr-overlaps-alert" type="number" placeholder="5"></td>
+                <td><span class="thr-dir">higher = worse</span></td></tr>
+              <tr><td>Spikes Count</td>
+                <td><input class="thr-input" id="thr-spikes-warn"  type="number" placeholder="1"></td>
+                <td><input class="thr-input" id="thr-spikes-alert" type="number" placeholder="5"></td>
+                <td><span class="thr-dir">higher = worse</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="modal-footer">
+          <button id="settings-reset">Reset defaults</button>
+          <button id="settings-apply" class="btn-primary">Apply &amp; Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- global floating tooltip used by all charts -->
+  <div id="chart-tooltip" class="chart-tt" style="display:none"></div>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet.markercluster.js"></script>
+<script src="vendor/uplot.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

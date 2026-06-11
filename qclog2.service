@@ -1,0 +1,21 @@
+[Unit]
+Description=qclog2 QC backend — listens to scqc via scmaster, writes JSON for dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/seiscomp/var/run/qclog2
+
+Environment="SEISCOMP_ROOT=/opt/seiscomp"
+Environment="PATH=/opt/seiscomp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="LD_LIBRARY_PATH=/opt/seiscomp/lib"
+Environment="PYTHONPATH=/opt/seiscomp/lib/python"
+
+ExecStart=/opt/seiscomp/bin/seiscomp-python /opt/seiscomp/var/run/qclog2/backend.py -H localhost
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

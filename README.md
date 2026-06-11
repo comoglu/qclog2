@@ -1,0 +1,249 @@
+# qclog2
+
+A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP's `QC` messaging group via `scmaster`, stores measurements in SQLite, and periodically writes JSON files that the frontend polls. No build step — the frontend is plain HTML/CSS/JS served statically.
+
+![Heatmap view showing 219 streams over 7 days](vendor/images/screenshot_placeholder.png)
+
+---
+
+## Features
+
+- **Table view** — colour-coded grid of the latest value for every stream × parameter combination; click any cell to open a sparkline chart panel
+- **Grid view** — station-level cards aggregating worst status per station
+- **Map view** — Leaflet map with clustered markers coloured by QC status; coordinates fetched from FDSNWS
+- **History tab** — single-stream uPlot chart for 1h / 6h / 24h / 7d ranges with statistics
+- **Overlay tab** — multi-stream overlay chart; network-grouped stream selector with search and "Top 10 worst" shortcut
+- **Heatmap tab** — canvas-based grid (streams × time bins) for quick visual pattern detection across all streams
+- **Events log** — automatically detects status transitions on every refresh cycle; browser notifications on alert/recovery
+- **Configurable thresholds** — per-parameter warn/alert levels stored in `localStorage`; applied live to all views
+- **Watchlist** — bookmark specific streams; filter to watchlisted streams only
+- **Dark/light theme toggle**
+- **CSV export**
+
+---
+
+## Requirements
+
+- [SeisComP](https://www.seiscomp.de/) with `scqc` and `scmaster` running
+- Python 3.8+ (the `seiscomp-python` interpreter that ships with SeisComP)
+- A web server (nginx recommended) to serve the static frontend files
+- Optional: an FDSNWS station service (e.g. `fdsnws` module in SeisComP) for map coordinates
+
+---
+
+## Installation
+
+### 1. Copy files to the deploy directory
+
+```bash
+DEPLOY=/opt/seiscomp/var/run/qclog2
+sudo mkdir -p $DEPLOY
+sudo chown $USER:$USER $DEPLOY
+
+cp backend.py backfill.py run_backend.sh app.js index.html style.css $DEPLOY/
+cp -r vendor/ $DEPLOY/vendor/
+```
+
+### 2. Create `config.json`
+
+```bash
+cp config.example.json $DEPLOY/config.json
+```
+
+Edit `$DEPLOY/config.json`:
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `db_path` | Path to the SQLite database file | `…/qclog2/qc.db` |
+| `output_dir` | Directory where JSON files are written | same as `db_path` parent |
+| `json_interval` | Seconds between JSON writes | `60` |
+| `raw_retention_h` | Hours to keep raw QC rows before rolling up to hourly | `25` |
+| `hourly_retention_d` | Days to keep hourly rollup rows | `30` |
+| `fdsnws` | FDSNWS base URL for station coordinates. Use a relative path (e.g. `/fdsnws`) if nginx proxies it; use a full URL only if the service is directly reachable from the browser. | `/fdsnws` |
+
+### 3. Install as a systemd service
+
+```bash
+sudo cp qclog2.service /etc/systemd/system/qclog2.service
+```
+
+Edit the service file to match your `User`, `SEISCOMP_ROOT`, and deploy path, then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now qclog2
+sudo systemctl status qclog2
+```
+
+The service will restart automatically if it crashes.
+
+### 4. Serve the frontend with nginx
+
+Add a location block to your nginx site config:
+
+```nginx
+# Serve qclog2 dashboard
+location /qclog2/ {
+    alias /opt/seiscomp/var/run/qclog2/;
+    try_files $uri $uri/ =404;
+}
+
+# Proxy FDSNWS station service (adjust port to match your setup)
+location /fdsnws/ {
+    proxy_pass http://localhost:8081;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+Then reload nginx:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+The dashboard is now available at `http://your-server/qclog2/`.
+
+> **Tip:** Add `auth_basic` to the nginx location if you want password protection.
+
+---
+
+## Running the backend manually (development)
+
+```bash
+# Requires a running scmaster on localhost
+seiscomp-python backend.py -H localhost
+
+# Production wrapper — copies environment from running scmaster process
+bash run_backend.sh -H localhost
+```
+
+---
+
+## Backfilling historical data
+
+Run `backfill.py` once after first deploy to seed the database with past QC data. The normal backend continues handling real-time data independently.
+
+### Mode A — from the SeisComP database (recommended)
+
+```bash
+seiscomp-python backfill.py -H localhost --days 7
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `-H HOST` | scmaster host (required for database access) |
+| `--days N` | Days of history to import (1–365, default: 7) |
+
+### Mode B — from another qclog2 SQLite database
+
+Useful when seeding a new deployment from an existing one:
+
+```bash
+# Copy the database from the source server
+scp mainbox:/opt/seiscomp/var/run/qclog2/qc.db /tmp/qc_import.db
+
+# Import the last 30 days
+seiscomp-python backfill.py --source-db /tmp/qc_import.db --days 30
+```
+
+Backfill regenerates `qc_current.json`, `qc_24h.json`, and `qc_7d.json` when it finishes.
+
+---
+
+## Architecture
+
+```
+scqc → scmaster → backend.py handleMessage()
+                       │
+                  qc_raw (SQLite)          ← raw rows, kept ~25 h
+                       │  (hourly rollup)
+                  qc_hourly (SQLite)       ← hourly avg/min/max, kept 30 d
+                       │  (every json_interval)
+          qc_current.json  qc_24h.json    ← frontend polls these
+                       │  (every hour)
+                  qc_7d.json
+                       │  (every json_interval)
+                  health.json             ← alive check: ts, stream count, message count
+```
+
+### Backend (`backend.py`)
+
+- `QCBackend` extends `seiscomp.client.Application`
+- Inserts are buffered (flush every 100 rows or `json_interval`)
+- `_write_current()` — latest value + 24-point hourly sparkline per (stream, parameter)
+- `_write_24h()` — 10-minute bins over the last 24 h from `qc_raw`
+- `_write_7d()` — hourly averages over the last 7 d from `qc_hourly`
+- `_write_health()` — alive check JSON: timestamp, distinct stream count, total message count
+- `_rollup_hourly()` — moves `qc_raw` rows older than `raw_retention_h` into `qc_hourly`, prunes old hourly rows, checkpoints the WAL
+
+### Frontend (`app.js`)
+
+Single global state object `S`. No framework, no build step.
+
+- Polls `qc_current.json` on a configurable interval (default 60 s)
+- Charts rendered with [uPlot](https://github.com/leeoniya/uPlot)
+- Map rendered with [Leaflet](https://leafletjs.com/) + [Leaflet.MarkerCluster](https://github.com/Leaflet/Leaflet.markercluster)
+- All user preferences (thresholds, watchlist, FDSNWS URL) persisted to `localStorage`
+
+---
+
+## QC parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `availability` | Data availability (%) |
+| `delay` | Feed delay (s) |
+| `latency` | Processing latency (s) |
+| `timing_quality` | GPS timing quality (%) |
+| `rms` | RMS amplitude |
+| `offset` | DC offset |
+| `gaps_count` | Number of data gaps |
+| `overlaps_count` | Number of overlapping records |
+| `spikes_count` | Number of spikes detected |
+
+---
+
+## Health monitoring
+
+`health.json` is written every `json_interval` seconds:
+
+```json
+{
+  "ok": true,
+  "ts": 1749639480000,
+  "streams": 219,
+  "messages": 45210
+}
+```
+
+You can use this for a watchdog — alert if `ts` is more than a few minutes old:
+
+```bash
+# Example: cron check every 5 minutes
+*/5 * * * * python3 -c "
+import json, time, sys
+d = json.load(open('/opt/seiscomp/var/run/qclog2/health.json'))
+age = time.time() - d['ts']/1000
+if age > 300: sys.exit(1)
+" || mail -s 'qclog2 backend stale' admin@example.com
+```
+
+---
+
+## Vendor libraries
+
+All vendor libraries are bundled — no CDN dependency.
+
+| Library | Version | License |
+|---------|---------|---------|
+| [Leaflet](https://leafletjs.com/) | 1.9.x | BSD-2-Clause |
+| [Leaflet.MarkerCluster](https://github.com/Leaflet/Leaflet.markercluster) | 1.5.x | MIT |
+| [uPlot](https://github.com/leeoniya/uPlot) | 1.6.x | MIT |
+
+---
+
+## License
+
+MIT

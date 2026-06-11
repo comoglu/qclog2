@@ -1,0 +1,387 @@
+#!/usr/bin/env seiscomp-python
+# -*- coding: utf-8 -*-
+"""
+qclog2 backend — listens to scqc messages via scmaster, stores in SQLite,
+periodically writes qc_current.json and qc_24h.json for the frontend.
+
+Run:
+  seiscomp-python backend.py -H localhost
+  or via systemd (see qclog2-backend.service)
+"""
+
+from __future__ import print_function
+import json
+import os
+import sqlite3
+import sys
+import time
+import traceback
+from pathlib import Path
+
+from seiscomp import core, client, datamodel
+
+
+# ── Parameter name normalisation ─────────────────────────────────────────────
+# scqc sends human-readable strings; we normalise to snake_case JSON keys
+_PARAM_MAP = {
+    'availability':     'availability',
+    'delay':            'delay',
+    'latency':          'latency',
+    'rms':              'rms',
+    'timing quality':   'timing_quality',
+    'offset':           'offset',
+    'gaps count':       'gaps_count',
+    'overlaps count':   'overlaps_count',
+    'spikes count':     'spikes_count',
+    'outage':           'outage',
+    'gaps interval':    'gaps_interval',
+    'overlaps interval':'overlaps_interval',
+    'spikes interval':  'spikes_interval',
+}
+
+# Display order for the frontend grid
+PARAM_ORDER = [
+    'availability', 'delay', 'latency', 'timing_quality',
+    'rms', 'offset', 'gaps_count', 'overlaps_count',
+    'spikes_count', 'outage',
+]
+
+
+def _norm_param(p):
+    return _PARAM_MAP.get(p.lower().strip(), p.lower().replace(' ', '_'))
+
+
+def _sc_time_to_ms(t):
+    """Convert SeisComP core.Time to epoch milliseconds (int)."""
+    return t.seconds() * 1000 + t.microseconds() // 1000
+
+
+def _load_config():
+    cfg_path = Path(__file__).parent / 'config.json'
+    try:
+        with open(cfg_path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+# ── Database ──────────────────────────────────────────────────────────────────
+
+def _open_db(path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path, check_same_thread=False, timeout=30)
+    db.execute('PRAGMA journal_mode=WAL')
+    db.execute('PRAGMA synchronous=NORMAL')
+    db.execute('PRAGMA busy_timeout=30000')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS qc_raw (
+            stream    TEXT    NOT NULL,
+            time_ms   INTEGER NOT NULL,
+            parameter TEXT    NOT NULL,
+            value     REAL    NOT NULL
+        )''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS qc_hourly (
+            stream    TEXT    NOT NULL,
+            hour_ms   INTEGER NOT NULL,
+            parameter TEXT    NOT NULL,
+            avg       REAL    NOT NULL,
+            min       REAL    NOT NULL,
+            max       REAL    NOT NULL,
+            count     INTEGER NOT NULL,
+            PRIMARY KEY (stream, hour_ms, parameter)
+        )''')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_raw ON qc_raw(stream, parameter, time_ms DESC)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_raw_time ON qc_raw(time_ms)')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_hourly ON qc_hourly(stream, parameter, hour_ms DESC)')
+    db.commit()
+    return db
+
+
+# ── JSON generation ───────────────────────────────────────────────────────────
+
+def _atomic_write(path, content):
+    """Write JSON atomically so readers never see a partial file."""
+    tmp = str(path) + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(content, f, separators=(',', ':'))
+    os.replace(tmp, path)
+
+
+def _write_current(db, output_dir):
+    """
+    qc_current.json — latest value per stream per parameter, plus a 24-point
+    sparkline at hourly resolution for each (used for mini inline charts).
+    """
+    now_ms = int(time.time() * 1000)
+    cutoff  = now_ms - 24 * 3600 * 1000   # only consider last 24h
+
+    # Latest value per (stream, parameter) within last 24h
+    rows = db.execute('''
+        SELECT stream, parameter, value, time_ms
+        FROM qc_raw
+        WHERE time_ms >= ?
+        AND time_ms = (
+            SELECT MAX(r2.time_ms) FROM qc_raw r2
+            WHERE r2.stream = qc_raw.stream
+              AND r2.parameter = qc_raw.parameter
+              AND r2.time_ms >= ?
+        )
+        ORDER BY stream, parameter
+    ''', (cutoff, cutoff)).fetchall()
+
+    streams = {}
+    for stream, param, value, ts in rows:
+        if stream not in streams:
+            streams[stream] = {}
+        streams[stream][param] = {'v': round(value, 4), 't': ts}
+
+    # Hourly sparklines from qc_hourly (last 24 hours)
+    hour_cutoff = now_ms - 24 * 3600 * 1000
+    spark_rows = db.execute('''
+        SELECT stream, parameter, hour_ms, avg
+        FROM qc_hourly
+        WHERE hour_ms >= ?
+        ORDER BY stream, parameter, hour_ms
+    ''', (hour_cutoff,)).fetchall()
+
+    sparks = {}
+    for stream, param, hour_ms, avg in spark_rows:
+        if stream not in sparks:
+            sparks[stream] = {}
+        if param not in sparks[stream]:
+            sparks[stream][param] = []
+        sparks[stream][param].append([hour_ms, round(avg, 4)])
+
+    # Merge sparklines into stream dict
+    for stream, params in sparks.items():
+        if stream not in streams:
+            streams[stream] = {}
+        for param, points in params.items():
+            if param in streams[stream]:
+                streams[stream][param]['spark'] = points
+            else:
+                # param in history but not in recent raw — include anyway
+                streams[stream][param] = {'v': None, 't': None, 'spark': points}
+
+    _atomic_write(
+        Path(output_dir) / 'qc_current.json',
+        {'generated': now_ms, 'params': PARAM_ORDER, 'streams': streams}
+    )
+
+
+def _write_24h(db, output_dir):
+    """
+    qc_24h.json — last 24h at 10-minute resolution for interactive uPlot charts.
+    Format: { generated, streams: { "N.S.L.C": { param: [[t_ms, v], ...] } } }
+    """
+    now_ms   = int(time.time() * 1000)
+    cutoff   = now_ms - 24 * 3600 * 1000
+    bin_ms   = 10 * 60 * 1000   # 10-minute bins
+
+    rows = db.execute('''
+        SELECT stream, parameter,
+               (time_ms / ?) * ? AS bin,
+               AVG(value) AS avg
+        FROM qc_raw
+        WHERE time_ms >= ?
+        GROUP BY stream, parameter, bin
+        ORDER BY stream, parameter, bin
+    ''', (bin_ms, bin_ms, cutoff)).fetchall()
+
+    streams = {}
+    for stream, param, bin_ms_val, avg in rows:
+        if stream not in streams:
+            streams[stream] = {}
+        if param not in streams[stream]:
+            streams[stream][param] = []
+        streams[stream][param].append([bin_ms_val, round(avg, 4)])
+
+    _atomic_write(
+        Path(output_dir) / 'qc_24h.json',
+        {'generated': now_ms, 'streams': streams}
+    )
+
+
+def _write_7d(db, output_dir):
+    """
+    qc_7d.json — last 7 days at hourly resolution from qc_hourly table.
+    """
+    now_ms  = int(time.time() * 1000)
+    cutoff  = now_ms - 7 * 24 * 3600 * 1000
+
+    rows = db.execute('''
+        SELECT stream, parameter, hour_ms, avg
+        FROM qc_hourly
+        WHERE hour_ms >= ?
+        ORDER BY stream, parameter, hour_ms
+    ''', (cutoff,)).fetchall()
+
+    streams = {}
+    for stream, param, hour_ms, avg in rows:
+        if stream not in streams:
+            streams[stream] = {}
+        if param not in streams[stream]:
+            streams[stream][param] = []
+        streams[stream][param].append([hour_ms, round(avg, 4)])
+
+    _atomic_write(
+        Path(output_dir) / 'qc_7d.json',
+        {'generated': now_ms, 'streams': streams}
+    )
+
+
+def _write_health(output_dir, stream_count, msg_count):
+    """health.json — written every json_interval; shows backend is alive."""
+    _atomic_write(
+        Path(output_dir) / 'health.json',
+        {
+            'ok':           True,
+            'ts':           int(time.time() * 1000),
+            'streams':      stream_count,
+            'messages':     msg_count,
+        }
+    )
+
+
+# ── Maintenance ───────────────────────────────────────────────────────────────
+
+def _rollup_hourly(db, raw_retention_h):
+    """
+    Aggregate raw rows older than raw_retention_h into qc_hourly, then prune them.
+    Called once per hour.
+    """
+    now_ms   = int(time.time() * 1000)
+    cutoff   = now_ms - raw_retention_h * 3600 * 1000
+    hour_ms  = 3600 * 1000
+
+    # Find raw rows outside retention window
+    old_rows = db.execute('''
+        SELECT stream,
+               (time_ms / ?) * ? AS hour,
+               parameter,
+               AVG(value), MIN(value), MAX(value), COUNT(*)
+        FROM qc_raw
+        WHERE time_ms < ?
+        GROUP BY stream, parameter, hour
+    ''', (hour_ms, hour_ms, cutoff)).fetchall()
+
+    if old_rows:
+        db.executemany('''
+            INSERT INTO qc_hourly (stream, hour_ms, parameter, avg, min, max, count)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(stream, hour_ms, parameter) DO UPDATE SET
+                avg   = (avg * count + excluded.avg * excluded.count) / (count + excluded.count),
+                min   = MIN(min, excluded.min),
+                max   = MAX(max, excluded.max),
+                count = count + excluded.count
+        ''', old_rows)
+        db.execute('DELETE FROM qc_raw WHERE time_ms < ?', (cutoff,))
+        db.commit()
+        db.execute('PRAGMA wal_checkpoint(PASSIVE)')
+
+    # Prune hourly rows older than 30 days
+    hourly_cutoff = now_ms - 30 * 24 * 3600 * 1000
+    db.execute('DELETE FROM qc_hourly WHERE hour_ms < ?', (hourly_cutoff,))
+    db.commit()
+
+
+# ── SeisComP Application ──────────────────────────────────────────────────────
+
+class QCBackend(client.Application):
+
+    def __init__(self, argc, argv):
+        client.Application.__init__(self, argc, argv)
+        self.setMessagingEnabled(True)
+        self.setMessagingUsername('qclog2')
+        self.addMessagingSubscription('QC')
+        self.setDatabaseEnabled(False, False)
+
+        cfg = _load_config()
+        self._db_path       = cfg.get('db_path',       str(Path(__file__).parent / 'qc.db'))
+        self._output_dir    = cfg.get('output_dir',    str(Path(__file__).parent))
+        self._json_interval = cfg.get('json_interval', 60)
+        self._raw_ret_h     = cfg.get('raw_retention_h', 25)
+
+        self._db            = None
+        self._insert_buf    = []       # batch inserts
+        self._buf_limit     = 100
+        self._last_json     = 0
+        self._last_rollup   = 0
+        self._last_7d       = 0
+        self._msg_count     = 0
+        self._seen_streams  = set()
+
+    def run(self):
+        try:
+            self._db = _open_db(self._db_path)
+            print(f'[qclog2] DB: {self._db_path}', flush=True)
+            print(f'[qclog2] Output: {self._output_dir}', flush=True)
+            return client.Application.run(self)
+        except Exception:
+            traceback.print_exc()
+            return False
+
+    def handleMessage(self, msg):
+        try:
+            dm = core.DataMessage.Cast(msg)
+            if not dm:
+                return
+
+            now = time.time()
+            for att in dm:
+                wfq = datamodel.WaveformQuality.Cast(att)
+                if not wfq:
+                    continue
+                wid = wfq.waveformID()
+                stream = f'{wid.networkCode()}.{wid.stationCode()}.{wid.locationCode()}.{wid.channelCode()}'
+                ts_ms  = _sc_time_to_ms(wfq.start())
+                param  = _norm_param(wfq.parameter())
+                value  = wfq.value()
+                self._insert_buf.append((stream, ts_ms, param, value))
+                self._msg_count += 1
+                self._seen_streams.add(stream)
+
+            # Flush buffer
+            if len(self._insert_buf) >= self._buf_limit:
+                self._flush()
+
+            # Periodic tasks
+            if now - self._last_json >= self._json_interval:
+                self._flush()
+                self._write_json()
+                self._last_json = now
+
+            if now - self._last_rollup >= 3600:
+                _rollup_hourly(self._db, self._raw_ret_h)
+                self._last_rollup = now
+
+            if now - self._last_7d >= 3600:
+                _write_7d(self._db, self._output_dir)
+                self._last_7d = now
+
+        except Exception:
+            traceback.print_exc()
+
+    def _flush(self):
+        if not self._insert_buf:
+            return
+        self._db.executemany(
+            'INSERT INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
+            self._insert_buf
+        )
+        self._db.commit()
+        self._insert_buf.clear()
+
+    def _write_json(self):
+        try:
+            _write_current(self._db, self._output_dir)
+            _write_24h(self._db, self._output_dir)
+            _write_health(self._output_dir, len(self._seen_streams), self._msg_count)
+            print(f'[qclog2] JSON written at {time.strftime("%H:%M:%S")}', flush=True)
+        except Exception:
+            traceback.print_exc()
+
+
+app = QCBackend(len(sys.argv), sys.argv)
+sys.exit(app())

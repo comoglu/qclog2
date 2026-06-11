@@ -1,0 +1,1723 @@
+'use strict';
+
+// ══════════════════════════════════════════════════════════
+// CONFIGURATION DEFAULTS
+// ══════════════════════════════════════════════════════════
+const PARAMS = {
+  availability:   { label: 'Avail',   unit: '%',  fmt: v => v == null ? '—' : v.toFixed(1)+'%',  lowerWorse: true  },
+  delay:          { label: 'Delay',   unit: 's',  fmt: v => v == null ? '—' : fmtSec(v),          lowerWorse: false },
+  latency:        { label: 'Latency', unit: 's',  fmt: v => v == null ? '—' : fmtSec(v),          lowerWorse: false },
+  timing_quality: { label: 'Timing',  unit: '%',  fmt: v => v == null ? '—' : v.toFixed(0)+'%',   lowerWorse: true  },
+  rms:            { label: 'RMS',     unit: 'cts',fmt: v => v == null ? '—' : v.toFixed(1),        lowerWorse: null  },
+  offset:         { label: 'Offset',  unit: 'cts',fmt: v => v == null ? '—' : v.toFixed(1),        lowerWorse: null  },
+  gaps_count:     { label: 'Gaps',    unit: '',   fmt: v => v == null ? '—' : v.toFixed(0),        lowerWorse: false },
+  overlaps_count: { label: 'Ovlps',  unit: '',   fmt: v => v == null ? '—' : v.toFixed(0),        lowerWorse: false },
+  spikes_count:   { label: 'Spikes', unit: '',   fmt: v => v == null ? '—' : v.toFixed(0),        lowerWorse: false },
+};
+
+const DEFAULTS = {
+  dataUrl:   'qc_current.json',
+  histUrl:   'qc_24h.json',
+  fdsnws:    '',
+  refreshMs: 60_000,
+  theme:     'light',
+  thresholds: {
+    availability:   { warn: 80,  alert: 50,  lowerWorse: true  },
+    delay:          { warn: 60,  alert: 300, lowerWorse: false },
+    latency:        { warn: 60,  alert: 300, lowerWorse: false },
+    timing_quality: { warn: 80,  alert: 50,  lowerWorse: true  },
+    gaps_count:     { warn: 1,   alert: 5,   lowerWorse: false },
+    overlaps_count: { warn: 1,   alert: 5,   lowerWorse: false },
+    spikes_count:   { warn: 1,   alert: 5,   lowerWorse: false },
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// APPLICATION STATE
+// ══════════════════════════════════════════════════════════
+const S = {
+  data:         null,   // parsed qc_current.json
+  histData:     null,   // parsed qc_24h.json or qc_7d.json
+  histRange:    '24h',
+  coordinates:  {},
+  lastUpdateMs: null,
+
+  prefs: {
+    dataUrl:    DEFAULTS.dataUrl,
+    histUrl:    DEFAULTS.histUrl,
+    fdsnws:     DEFAULTS.fdsnws,
+    refreshMs:  DEFAULTS.refreshMs,
+    theme:      DEFAULTS.theme,
+    thresholds: JSON.parse(JSON.stringify(DEFAULTS.thresholds)),
+    watchlist:  [],
+  },
+
+  view:       'table',
+  filter:     { net: '', param: '', status: '', search: '' },
+  sort:       { key: 'stream', asc: true },
+  detailStream: null,
+  detailParam:  null,
+  watchlist:  new Set(),
+  theme:      'light',
+  refreshMs:  60_000,
+
+  mainTimer:  null,
+  cdTimer:    null,
+  cdSecs:     0,
+  uplot:      null,
+  visibleParams: [],   // params actually seen in data
+
+  // Compare view
+  cmpPlot:    null,
+  cmpRange:   '24h',
+
+  // Heatmap view
+  hmRange:    '24h',
+  hmCanvas:   null,
+  hmStreams:  [],
+  hmBins:     [],
+  hmCellW:    0,
+  hmCellH:    16,
+  hmLabelW:   130,
+
+  // Events
+  events:      [],     // [{ ts, stream, from, to, resolvedTs }]
+  prevStatus:  {},     // { stream: status } from last cycle
+
+  // Prefs (add to existing prefs object at loadPrefs time)
+  notifEnabled:  false,
+  watchlistOnly: false,
+};
+
+// ══════════════════════════════════════════════════════════
+// UTILITIES
+// ══════════════════════════════════════════════════════════
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function fmtSec(s) {
+  if (s == null || s < 0) return '—';
+  if (s < 60)    return `${s.toFixed(1)}s`;
+  if (s < 3600)  return `${(s/60).toFixed(1)}m`;
+  if (s < 86400) return `${(s/3600).toFixed(1)}h`;
+  return `${(s/86400).toFixed(1)}d`;
+}
+
+const fmtTime = ms => ms ? new Date(ms).toISOString().slice(0,19).replace('T',' ')+' UTC' : '—';
+
+// DD/MM at midnight, HH:MM otherwise — used for all uPlot x-axes
+const fmtXAxis = (u, vals) => vals.map(v => {
+  if (v == null) return '';
+  const d = new Date(v * 1000);
+  const HH = String(d.getUTCHours()).padStart(2,'0');
+  const MM = String(d.getUTCMinutes()).padStart(2,'0');
+  if (HH === '00' && MM === '00')
+    return `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+  return `${HH}:${MM}`;
+});
+
+function cellStatus(param, value) {
+  if (value == null) return 'nodata';
+  const thr = S.prefs.thresholds[param];
+  if (!thr) return 'info';   // no threshold = informational only
+  const { warn, alert, lowerWorse } = thr;
+  if (lowerWorse) {
+    if (value <= alert) return 'alert';
+    if (value <= warn)  return 'warn';
+  } else {
+    if (value >= alert) return 'alert';
+    if (value >= warn)  return 'warn';
+  }
+  return 'ok';
+}
+
+function streamStatus(streamData) {
+  // worst status across all threshold-bearing params
+  let worst = 'ok';
+  const rank = { nodata: 4, alert: 3, warn: 2, ok: 1, info: 0 };
+  for (const [param, entry] of Object.entries(streamData)) {
+    const st = cellStatus(param, entry?.v ?? null);
+    if ((rank[st] ?? 0) > (rank[worst] ?? 0)) worst = st;
+  }
+  return worst;
+}
+
+// ══════════════════════════════════════════════════════════
+// DATA FETCH
+// ══════════════════════════════════════════════════════════
+let _seq = 0;
+
+function fetchData() {
+  setBadge('connecting');
+  const seq = ++_seq;
+  const url = S.prefs.dataUrl + '?_=' + Date.now();
+
+  fetch(url)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      if (seq !== _seq) return;
+      S.data         = data;
+      S.lastUpdateMs = Date.now();
+
+      detectEvents(data);
+      savePrefs();
+
+      // Determine which params are actually present in this data
+      const seen = new Set();
+      for (const params of Object.values(data.streams || {}))
+        for (const k of Object.keys(params)) seen.add(k);
+      S.visibleParams = (data.params || Object.keys(PARAMS))
+        .filter(p => seen.has(p) && PARAMS[p]);
+
+      render();
+      const ageMs = data.generated ? Date.now() - data.generated : null;
+      setBadge(ageMs !== null && ageMs > 5 * 60_000 ? 'stale' : 'live');
+      scheduleMain();
+    })
+    .catch(() => {
+      if (seq !== _seq) return;
+      setBadge('error');
+      scheduleMain();
+    });
+}
+
+function scheduleMain() {
+  clearTimeout(S.mainTimer);
+  clearInterval(S.cdTimer);
+  S.cdSecs = S.refreshMs / 1000;
+  updateCountdown();
+  S.cdTimer   = setInterval(() => { S.cdSecs--; updateCountdown(); }, 1000);
+  S.mainTimer = setTimeout(() => { clearInterval(S.cdTimer); fetchData(); }, S.refreshMs);
+}
+
+const updateCountdown = () => {
+  const el = document.getElementById('footer-countdown');
+  if (el) el.textContent = `Next refresh in ${S.cdSecs}s`;
+};
+
+// ══════════════════════════════════════════════════════════
+// RENDER
+// ══════════════════════════════════════════════════════════
+function render() {
+  if (!S.data) return;
+  renderStatusBar();
+  renderNetFilter();
+  populateHistStream();
+  populateCompareStreams();
+  if (S.view === 'table') renderTable();
+  if (S.view === 'grid')  renderGrid();
+  if (S.view === 'map' && _map) refreshMapMarkers();
+  updateEventsBadge();
+  const totalStreams = Object.keys(S.data.streams || {}).length;
+  document.getElementById('footer-info').textContent =
+    `${totalStreams} streams · ${S.visibleParams.length} parameters`;
+  const lu = document.getElementById('last-update-text');
+  if (lu) lu.textContent = S.lastUpdateMs ? `Updated ${fmtTime(S.lastUpdateMs)}` : '';
+}
+
+// ══════════════════════════════════════════════════════════
+// VIEW SWITCHING
+// ══════════════════════════════════════════════════════════
+function switchView(v) {
+  S.view = v;
+  document.querySelectorAll('.view').forEach(s =>
+    s.classList.toggle('active', s.id === 'view-' + v));
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.view === v));
+  if (v === 'map' || v === 'history' || v === 'compare' || v === 'heatmap' || v === 'events') closeChart();
+  if (v !== 'history' && _histPlot) { _histPlot.destroy(); _histPlot = null; }
+  if (v === 'map')             { initMap(); if (S.data) refreshMapMarkers(); }
+  if (v === 'grid'  && S.data) renderGrid();
+  if (v === 'table' && S.data) renderTable();
+  if (v === 'events') renderEvents();
+}
+
+// ── Status bar ──────────────────────────────────────────────
+function renderStatusBar() {
+  const streams = Object.values(S.data.streams || {});
+  const counts = { ok: 0, warn: 0, alert: 0, nodata: 0 };
+  const nets = {};
+
+  for (const [sid, sdata] of Object.entries(S.data.streams || {})) {
+    const st  = streamStatus(sdata);
+    counts[st] = (counts[st] || 0) + 1;
+    const net = sid.split('.')[0];
+    if (!nets[net]) nets[net] = { total: 0, ok: 0 };
+    nets[net].total++;
+    if (st === 'ok') nets[net].ok++;
+  }
+
+  document.getElementById('status-counts').innerHTML =
+    Object.entries({ alert: counts.alert, warn: counts.warn, ok: counts.ok, nodata: counts.nodata })
+      .filter(([,n]) => n > 0)
+      .map(([st,n]) =>
+        `<span class="scount qc-${st}${S.filter.status === st ? ' active-filter' : ''}" data-filter="${st}">${n} ${st}</span>`
+      ).join('');
+
+  document.getElementById('net-breakdown').innerHTML =
+    Object.entries(nets).sort(([a],[b]) => a.localeCompare(b)).map(([net,d]) => {
+      const pct = Math.round(d.ok / d.total * 100);
+      const col = pct >= 80 ? 'var(--s-ok)' : pct >= 50 ? 'var(--s-warn)' : 'var(--s-alert)';
+      return `<div class="net-pill" title="${net}: ${d.ok}/${d.total} ok">
+        <strong>${esc(net)}</strong>
+        <div class="net-health-bar"><div class="net-health-fill" style="width:${pct}%;background:${col}"></div></div>
+        <span class="pill-dim">${d.ok}/${d.total}</span>
+      </div>`;
+    }).join('');
+}
+
+function renderNetFilter() {
+  const nets = [...new Set(Object.keys(S.data.streams || {}).map(s => s.split('.')[0]))].sort();
+  const sel  = document.getElementById('filter-net');
+  const cur  = S.filter.net || sel.value;
+  sel.innerHTML = `<option value="">All Networks</option>` +
+    nets.map(n => `<option value="${esc(n)}"${n === cur ? ' selected' : ''}>${esc(n)}</option>`).join('');
+}
+
+// ── QC Grid Table ───────────────────────────────────────────
+function buildRows() {
+  const { net, param, status, search } = S.filter;
+  const q = search.toLowerCase();
+
+  return Object.entries(S.data.streams || {})
+    .filter(([sid, sdata]) => {
+      if (S.watchlistOnly && !S.watchlist.has(sid)) return false;
+      if (net    && sid.split('.')[0] !== net) return false;
+      if (search && !sid.toLowerCase().includes(q)) return false;
+      if (param) {
+        // show only streams that have this parameter
+        if (!sdata[param]) return false;
+      }
+      if (status) {
+        const st = streamStatus(sdata);
+        if (st !== status) return false;
+      }
+      return true;
+    })
+    .sort(([a], [b]) => {
+      if (S.sort.key === 'stream') return S.sort.asc ? a.localeCompare(b) : b.localeCompare(a);
+      const ap = S.data.streams[a][S.sort.key]?.v ?? null;
+      const bp = S.data.streams[b][S.sort.key]?.v ?? null;
+      if (ap === null && bp === null) return 0;
+      if (ap === null) return 1;
+      if (bp === null) return -1;
+      return S.sort.asc ? ap - bp : bp - ap;
+    });
+}
+
+function renderTable() {
+  const params = S.visibleParams;
+  if (!params.length) return;
+
+  // Build header
+  const thead = document.getElementById('qc-thead');
+  thead.innerHTML = `<tr>
+    <th class="col-stream sortable${S.sort.key === 'stream' ? ' sort-active' : ''}" data-sort="stream">
+      Stream${S.sort.key === 'stream' ? (S.sort.asc ? ' ▲' : ' ▼') : ''}
+    </th>
+    ${params.map(p => {
+      const active = S.sort.key === p;
+      return `<th class="col-param sortable${active ? ' sort-active' : ''}" data-sort="${p}"
+                title="${p.replace(/_/g,' ')} (${PARAMS[p].unit})">
+        ${PARAMS[p].label}${active ? (S.sort.asc ? ' ▲' : ' ▼') : ''}
+      </th>`;
+    }).join('')}
+  </tr>`;
+
+  const rows = buildRows();
+  const tbody = document.getElementById('qc-tbody');
+  const empty = document.getElementById('tbl-empty');
+
+  if (!rows.length) {
+    tbody.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Group by network
+  let lastNet = null;
+  tbody.innerHTML = rows.map(([sid, sdata]) => {
+    const parts = sid.split('.');
+    const net   = parts[0];
+    const netRow = (net !== lastNet)
+      ? `<tr class="net-group-row"><td colspan="${params.length + 1}" class="net-group-cell">${esc(net)}</td></tr>`
+      : '';
+    lastNet = net;
+    const stSta = `${parts[1]}${parts[2] ? '.'+parts[2] : ''}`;
+    const cha   = parts[3] || '';
+    const watched = S.watchlist.has(sid);
+    const overallSt = streamStatus(sdata);
+
+    const cells = params.map(p => {
+      const entry = sdata[p];
+      const val   = entry?.v ?? null;
+      const age   = entry?.t ? Date.now() - entry.t : null;
+      const st    = cellStatus(p, val);
+      const stale = age !== null && age > 30 * 60_000;  // value older than 30 min
+      const spark = entry?.spark ? buildSparkline(entry.spark) : '';
+      return `<td class="qc-cell qc-${st}${stale ? ' qc-stale' : ''}"
+                  data-stream="${esc(sid)}" data-param="${esc(p)}"
+                  title="${esc(p.replace(/_/g,' '))}: ${PARAMS[p].fmt(val)}${stale ? ' (stale)' : ''}">
+        <div class="cell-inner">
+          <span class="cell-val">${PARAMS[p].fmt(val)}</span>
+          ${spark}
+        </div>
+      </td>`;
+    }).join('');
+
+    return `${netRow}
+    <tr class="stream-row qc-row-${overallSt}${watched ? ' watched' : ''}" data-stream="${esc(sid)}">
+      <td class="col-stream-cell">
+        <button class="watch-btn${watched?' watched':''}" data-stream="${esc(sid)}">${watched?'★':'☆'}</button>
+        <span class="stream-sta">${esc(stSta)}</span>
+        <span class="stream-cha">${esc(cha)}</span>
+      </td>
+      ${cells}
+    </tr>`;
+  }).join('');
+
+  // Update visible count
+  document.getElementById('tab-stats') &&
+    (document.getElementById('tab-stats').textContent =
+      rows.length < Object.keys(S.data.streams||{}).length
+        ? `Showing ${rows.length} / ${Object.keys(S.data.streams).length}`
+        : `${rows.length} streams`);
+}
+
+function buildSparkline(points) {
+  if (!points || points.length < 2) return '';
+  const vals = points.map(p => p[1]);
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const range = mx - mn || 1;
+  const W = 40, H = 12;
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * W;
+    const y = H - ((v - mn) / range) * H;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return `<svg class="sparkline" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    <polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.6"/>
+  </svg>`;
+}
+
+// ══════════════════════════════════════════════════════════
+// CHART PANEL  (uPlot)
+// ══════════════════════════════════════════════════════════
+function openChart(stream, param) {
+  S.detailStream = stream;
+  S.detailParam  = param;
+
+  document.getElementById('chart-title').textContent = stream;
+  document.getElementById('chart-param-label').textContent = PARAMS[param]?.label ?? param;
+  document.getElementById('chart-panel').classList.remove('panel-closed');
+
+  // Mark active cell
+  document.querySelectorAll('.qc-cell.cell-active').forEach(c => c.classList.remove('cell-active'));
+  document.querySelectorAll(`.qc-cell[data-stream="${CSS.escape(stream)}"][data-param="${CSS.escape(param)}"]`)
+    .forEach(c => c.classList.add('cell-active'));
+
+  loadChartData();
+}
+
+function closeChart() {
+  S.detailStream = null;
+  document.getElementById('chart-panel').classList.add('panel-closed');
+  document.querySelectorAll('.qc-cell.cell-active').forEach(c => c.classList.remove('cell-active'));
+  if (S.uplot) { S.uplot.destroy(); S.uplot = null; }
+}
+
+function loadChartData() {
+  const range   = S.histRange;
+  const urlMap  = { '1h': 'qc_24h.json', '6h': 'qc_24h.json', '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
+  const jsonUrl = urlMap[range] ?? 'qc_24h.json';
+
+  document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
+
+  fetch(jsonUrl + '?_=' + Date.now())
+    .then(r => r.json())
+    .then(data => {
+      S.histData = data;
+      drawChart();
+    })
+    .catch(() => {
+      document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Failed to load history.</div>';
+    });
+}
+
+function drawChart() {
+  if (!S.detailStream || !S.detailParam || !S.histData) return;
+
+  const raw = S.histData.streams?.[S.detailStream]?.[S.detailParam] ?? [];
+  const range = S.histRange;
+  const nowMs = Date.now();
+  const rangeMs = { '1h': 3600_000, '6h': 6*3600_000, '24h': 24*3600_000, '7d': 7*24*3600_000 };
+  const cutoffMs = nowMs - (rangeMs[range] ?? 24*3600_000);
+
+  const filtered = raw.filter(([t]) => t >= cutoffMs);
+
+  const wrap = document.getElementById('chart-wrap');
+  wrap.innerHTML = '';
+
+  if (!filtered.length) {
+    wrap.innerHTML = '<div class="chart-loading">No data for this time range.</div>';
+    return;
+  }
+
+  // uPlot expects timestamps in SECONDS
+  const xs = filtered.map(([t]) => t / 1000);
+  const ys = filtered.map(([,v]) => v);
+
+  const param = S.detailParam;
+  const pInfo = PARAMS[param] ?? { label: param, unit: '' };
+  const thr   = S.prefs.thresholds[param];
+
+  const isDark = document.body.classList.contains('dark');
+  const textCol  = isDark ? '#94a3b8' : '#475569';
+  const gridCol  = isDark ? '#1e293b' : '#e2e8f0';
+  const lineCol  = '#2563eb';
+
+  const opts = {
+    width:  wrap.clientWidth || 500,
+    height: 220,
+    cursor: { show: true },
+    series: [
+      {},
+      {
+        label:  pInfo.label,
+        stroke: lineCol,
+        width:  2,
+        fill:   'rgba(37,99,235,0.08)',
+        value:  (u, v) => v == null ? '—' : pInfo.fmt(v),
+      },
+    ],
+    axes: [
+      { stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol }, values: fmtXAxis },
+      {
+        label:  pInfo.unit,
+        stroke: textCol,
+        grid:   { stroke: gridCol },
+        ticks:  { stroke: gridCol },
+        values: (u, vals) => vals.map(v => v == null ? '' : pInfo.fmt(v)),
+      },
+    ],
+    scales: { x: { time: true } },
+    padding: [10, 12, 0, 10],
+  };
+
+  // Draw threshold bands if defined
+  if (thr) {
+    opts.hooks = {
+      draw: [u => {
+        const ctx  = u.ctx;
+        const { left, top, width, height } = u.bbox;
+        ctx.save();
+        // warn band
+        const warnY  = u.valToPos(thr.warn,  'y', true);
+        const alertY = u.valToPos(thr.alert, 'y', true);
+        if (thr.lowerWorse) {
+          ctx.fillStyle = 'rgba(234,88,12,0.08)';
+          ctx.fillRect(left, alertY, width, warnY - alertY);
+          ctx.fillStyle = 'rgba(220,38,38,0.1)';
+          ctx.fillRect(left, top, width, alertY - top);
+        } else {
+          ctx.fillStyle = 'rgba(234,88,12,0.08)';
+          ctx.fillRect(left, warnY, width, alertY - warnY);
+          ctx.fillStyle = 'rgba(220,38,38,0.1)';
+          ctx.fillRect(left, alertY, width, top + height - alertY);
+        }
+        ctx.restore();
+      }],
+    };
+  }
+
+  // Cursor tooltip
+  if (!opts.hooks) opts.hooks = {};
+  opts.hooks.setCursor = [u => {
+    const tt = document.getElementById('chart-tooltip');
+    const { idx } = u.cursor;
+    if (idx == null || u.cursor.left < 0) { tt.style.display = 'none'; return; }
+    const rect = u.over.getBoundingClientRect();
+    const cx = rect.left + u.cursor.left, cy = rect.top + u.cursor.top;
+    const ts = new Date(xs[idx] * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    const v  = ys[idx];
+    const st = cellStatus(S.detailParam, v);
+    tt.innerHTML = `<div class="ct-time">${ts}</div>` +
+      `<div class="ct-row"><span class="ct-dot" style="background:#2563eb"></span>` +
+      `<span class="ct-lbl">${esc(pInfo.label)}</span>` +
+      `<span class="ct-val qc-${st}">${pInfo.fmt(v)}</span></div>`;
+    tt.style.display = 'block';
+    posTooltip(tt, cx, cy);
+  }];
+
+  if (S.uplot) { S.uplot.destroy(); S.uplot = null; }
+  S.uplot = new uPlot(opts, [xs, ys], wrap);
+  S.uplot.over.addEventListener('mouseleave', () => {
+    document.getElementById('chart-tooltip').style.display = 'none';
+  });
+
+  // Stats bar
+  const nonNull = ys.filter(v => v != null);
+  if (nonNull.length) {
+    const mn = Math.min(...nonNull), mx = Math.max(...nonNull);
+    const avg = nonNull.reduce((s,v) => s+v, 0) / nonNull.length;
+    document.getElementById('chart-stats').innerHTML =
+      `<span>min <strong>${pInfo.fmt(mn)}</strong></span>` +
+      `<span>avg <strong>${pInfo.fmt(avg)}</strong></span>` +
+      `<span>max <strong>${pInfo.fmt(mx)}</strong></span>` +
+      `<span class="chart-pts">${nonNull.length} points</span>`;
+  } else {
+    document.getElementById('chart-stats').innerHTML = '<span class="chart-pts">No data points</span>';
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// GRID VIEW
+// ══════════════════════════════════════════════════════════
+function aggregateStation(streamMap) {
+  const merged = {};
+  for (const sdata of Object.values(streamMap)) {
+    for (const [param, entry] of Object.entries(sdata)) {
+      if (!merged[param]) { merged[param] = { ...entry }; continue; }
+      if (entry.v == null) continue;
+      if (merged[param].v == null) { merged[param] = { ...entry }; continue; }
+      const thr = S.prefs.thresholds[param];
+      if (!thr) { merged[param] = { ...entry }; continue; }
+      const isWorse = thr.lowerWorse ? entry.v < merged[param].v : entry.v > merged[param].v;
+      if (isWorse) merged[param] = { ...entry };
+    }
+  }
+  return merged;
+}
+
+function renderGrid() {
+  const wrap = document.getElementById('grid-wrap');
+  if (!wrap || !S.data) return;
+  const { net, search, param: pf, status: sf } = S.filter;
+  const q = (search || '').toLowerCase();
+
+  const stations = {};
+  for (const [sid, sdata] of Object.entries(S.data.streams || {})) {
+    const parts = sid.split('.');
+    const stid = parts[0] + '.' + parts[1];
+    if (!stations[stid]) stations[stid] = { net: parts[0], streams: {} };
+    stations[stid].streams[sid] = sdata;
+  }
+
+  const nets = {};
+  for (const [stid, stData] of Object.entries(stations)) {
+    if (net    && stData.net !== net) continue;
+    if (search && !stid.toLowerCase().includes(q)) continue;
+    const merged = aggregateStation(stData.streams);
+    if (pf && !merged[pf]) continue;
+    const st = streamStatus(merged);
+    if (sf && st !== sf) continue;
+    if (!nets[stData.net]) nets[stData.net] = [];
+    nets[stData.net].push([stid, stData, merged, st]);
+  }
+
+  if (!Object.keys(nets).length) {
+    wrap.innerHTML = '<div class="empty-state">No stations match the current filters.</div>';
+    return;
+  }
+
+  let html = '';
+  for (const [nc, stList] of Object.entries(nets).sort()) {
+    html += `<div class="grid-net-group">
+      <div class="grid-net-title">${esc(nc)} — ${stList.length} station${stList.length !== 1 ? 's' : ''}</div>
+      <div class="grid-cards">`;
+    for (const [stid, stData, merged, st] of stList.sort(([a],[b]) => a.localeCompare(b)))
+      html += buildGridCard(stid, merged, st, Object.keys(stData.streams).length);
+    html += `</div></div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+function buildGridCard(stid, merged, worstSt, streamCount) {
+  const sta = stid.split('.')[1];
+  const params = S.visibleParams.slice(0, 5);
+  const rows = params.map(p => {
+    const val = merged[p]?.v ?? null;
+    const st  = cellStatus(p, val);
+    return `<div class="card-param">
+      <span class="card-param-label">${PARAMS[p].label}</span>
+      <span class="card-param-val qc-${st}">${PARAMS[p].fmt(val)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="grid-card qc-card-${worstSt}" title="${esc(stid)}">
+    <div class="card-hdr">
+      <span class="card-sta">${esc(sta)}</span>
+      <span class="card-badge qc-${worstSt}">${worstSt}</span>
+    </div>
+    <div class="card-params">${rows}</div>
+    <div class="card-footer">${streamCount} stream${streamCount !== 1 ? 's' : ''}</div>
+  </div>`;
+}
+
+// ══════════════════════════════════════════════════════════
+// MAP VIEW
+// ══════════════════════════════════════════════════════════
+let _map = null, _markerLayer = null;
+
+function initMap() {
+  if (_map) return;
+  const container = document.getElementById('map');
+  if (!container) return;
+  _map = L.map(container, { preferCanvas: true }).setView([20, 10], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 18,
+  }).addTo(_map);
+  _markerLayer = L.markerClusterGroup({ maxClusterRadius: 40 }).addTo(_map);
+  setTimeout(() => _map.invalidateSize(), 150);
+  if (S.prefs.fdsnws) fetchCoordinates().then(refreshMapMarkers);
+}
+
+async function fetchCoordinates() {
+  if (!S.prefs.fdsnws || Object.keys(S.coordinates).length) return;
+  try {
+    const url = S.prefs.fdsnws.replace(/\/$/, '') + '/station/1/query?level=station&format=text&nodata=404';
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const text = await r.text();
+    for (const line of text.split('\n')) {
+      if (line.startsWith('#') || !line.trim()) continue;
+      const p = line.split('|');
+      if (p.length < 4) continue;
+      const lat = parseFloat(p[2]), lon = parseFloat(p[3]);
+      if (!isNaN(lat) && !isNaN(lon))
+        S.coordinates[p[0].trim() + '.' + p[1].trim()] = [lat, lon];
+    }
+  } catch(_) {}
+}
+
+function refreshMapMarkers() {
+  if (!_map || !_markerLayer || !S.data) return;
+  _markerLayer.clearLayers();
+
+  const colMap = { ok: '#16a34a', warn: '#ca8a04', alert: '#dc2626', nodata: '#94a3b8' };
+  const stations = {};
+  for (const [sid, sdata] of Object.entries(S.data.streams || {})) {
+    const parts = sid.split('.');
+    const key = parts[0] + '.' + parts[1];
+    if (!stations[key]) stations[key] = { status: 'ok', streams: 0 };
+    const st = streamStatus(sdata);
+    const rank = { nodata: 4, alert: 3, warn: 2, ok: 1, info: 0 };
+    if ((rank[st] ?? 0) > (rank[stations[key].status] ?? 0)) stations[key].status = st;
+    stations[key].streams++;
+  }
+
+  for (const [key, stData] of Object.entries(stations)) {
+    const coords = S.coordinates[key];
+    if (!coords) continue;
+    const col = colMap[stData.status] ?? '#94a3b8';
+    const icon = L.divIcon({
+      className: '',
+      html: `<span style="display:block;width:10px;height:10px;border-radius:50%;background:${col};border:2px solid rgba(255,255,255,.9);box-shadow:0 1px 4px rgba(0,0,0,.5)"></span>`,
+      iconSize: [10, 10], iconAnchor: [5, 5],
+    });
+    L.marker(coords, { icon })
+      .bindPopup(`<strong style="font-family:monospace">${esc(key)}</strong><br>Status: <em>${stData.status}</em><br>${stData.streams} stream${stData.streams !== 1 ? 's' : ''} in QC`)
+      .addTo(_markerLayer);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// HISTORY VIEW
+// ══════════════════════════════════════════════════════════
+function populateHistStream() {
+  const sel = document.getElementById('hist-stream');
+  if (!sel || !S.data) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">Select stream…</option>' +
+    Object.keys(S.data.streams || {}).sort()
+      .map(sid => `<option${sid === cur ? ' selected' : ''}>${esc(sid)}</option>`)
+      .join('');
+}
+
+async function loadHistoryChart() {
+  const stream = document.getElementById('hist-stream')?.value;
+  const param  = document.getElementById('hist-param')?.value;
+  const wrap   = document.getElementById('history-chart-wrap');
+  if (!stream) {
+    wrap.innerHTML = '<div class="chart-loading">Select a stream first.</div>';
+    return;
+  }
+  const active  = document.querySelector('#view-history .tr-btn.active');
+  const range   = active?.dataset.range ?? '24h';
+  const urlMap  = { '1h': 'qc_24h.json', '6h': 'qc_24h.json', '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
+  const base    = S.prefs.dataUrl.replace(/[^/]*$/, '') || './';
+  const jsonUrl = base + (urlMap[range] ?? 'qc_24h.json');
+  wrap.innerHTML = '<div class="chart-loading">Loading…</div>';
+  document.getElementById('history-stats').innerHTML = '';
+  document.getElementById('history-table-wrap').innerHTML = '';
+  try {
+    const r = await fetch(jsonUrl + '?_=' + Date.now());
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    drawHistoryChart(data, stream, param, range);
+  } catch(_) {
+    wrap.innerHTML = '<div class="chart-loading">Failed to load history data.</div>';
+  }
+}
+
+let _histPlot = null;
+
+function drawHistoryChart(histData, stream, param, range) {
+  const raw      = histData.streams?.[stream]?.[param] ?? [];
+  const rangeMs  = { '1h': 3600e3, '6h': 6*3600e3, '24h': 24*3600e3, '7d': 7*24*3600e3 };
+  const cutoff   = Date.now() - (rangeMs[range] ?? 24*3600e3);
+  const filtered = raw.filter(([t]) => t >= cutoff);
+  const wrap     = document.getElementById('history-chart-wrap');
+  wrap.innerHTML = '';
+
+  if (!filtered.length) {
+    wrap.innerHTML = '<div class="chart-loading">No data in this time range.</div>';
+    return;
+  }
+
+  const xs     = filtered.map(([t]) => t / 1000);
+  const ys     = filtered.map(([,v]) => v);
+  const pInfo  = PARAMS[param] ?? { label: param, unit: '' };
+  const thr    = S.prefs.thresholds[param];
+  const isDark = document.body.classList.contains('dark');
+  const textCol = isDark ? '#94a3b8' : '#475569';
+  const gridCol = isDark ? '#1e293b' : '#e2e8f0';
+
+  const opts = {
+    width:  wrap.clientWidth || 700,
+    height: 260,
+    cursor: { show: true },
+    series: [
+      {},
+      { label: pInfo.label, stroke: '#2563eb', width: 2, fill: 'rgba(37,99,235,0.08)',
+        value: (u, v) => v == null ? '—' : pInfo.fmt(v) },
+    ],
+    axes: [
+      { stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol }, values: fmtXAxis },
+      { label: pInfo.unit, stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol },
+        values: (u, vals) => vals.map(v => v == null ? '' : pInfo.fmt(v)) },
+    ],
+    scales: { x: { time: true } },
+    padding: [10, 12, 0, 10],
+  };
+
+  if (thr) {
+    opts.hooks = { draw: [u => {
+      const ctx = u.ctx;
+      const { left, top, width, height } = u.bbox;
+      ctx.save();
+      const warnY  = u.valToPos(thr.warn,  'y', true);
+      const alertY = u.valToPos(thr.alert, 'y', true);
+      if (thr.lowerWorse) {
+        ctx.fillStyle = 'rgba(234,88,12,0.08)'; ctx.fillRect(left, alertY, width, warnY - alertY);
+        ctx.fillStyle = 'rgba(220,38,38,0.1)';  ctx.fillRect(left, top, width, alertY - top);
+      } else {
+        ctx.fillStyle = 'rgba(234,88,12,0.08)'; ctx.fillRect(left, warnY, width, alertY - warnY);
+        ctx.fillStyle = 'rgba(220,38,38,0.1)';  ctx.fillRect(left, alertY, width, top + height - alertY);
+      }
+      ctx.restore();
+    }]};
+  }
+
+  // Cursor tooltip
+  if (!opts.hooks) opts.hooks = {};
+  opts.hooks.setCursor = [u => {
+    const tt = document.getElementById('chart-tooltip');
+    const { idx } = u.cursor;
+    if (idx == null || u.cursor.left < 0) { tt.style.display = 'none'; return; }
+    const rect = u.over.getBoundingClientRect();
+    const cx = rect.left + u.cursor.left, cy = rect.top + u.cursor.top;
+    const ts = new Date(xs[idx] * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    const v  = ys[idx];
+    const st = cellStatus(param, v);
+    tt.innerHTML = `<div class="ct-time">${ts}</div>` +
+      `<div class="ct-row"><span class="ct-dot" style="background:#2563eb"></span>` +
+      `<span class="ct-lbl">${esc(pInfo.label)}</span>` +
+      `<span class="ct-val qc-${st}">${pInfo.fmt(v)}</span></div>`;
+    tt.style.display = 'block';
+    posTooltip(tt, cx, cy);
+  }];
+
+  if (_histPlot) { _histPlot.destroy(); _histPlot = null; }
+  _histPlot = new uPlot(opts, [xs, ys], wrap);
+  _histPlot.over.addEventListener('mouseleave', () => {
+    document.getElementById('chart-tooltip').style.display = 'none';
+  });
+
+  const nonNull = ys.filter(v => v != null);
+  if (nonNull.length) {
+    const mn = Math.min(...nonNull), mx = Math.max(...nonNull);
+    const avg = nonNull.reduce((a, v) => a + v, 0) / nonNull.length;
+    document.getElementById('history-stats').innerHTML =
+      `<div class="hist-stats-bar">
+        <span>min <strong>${pInfo.fmt(mn)}</strong></span>
+        <span>avg <strong>${pInfo.fmt(avg)}</strong></span>
+        <span>max <strong>${pInfo.fmt(mx)}</strong></span>
+        <span class="hist-pts">${nonNull.length} pts · ${range}</span>
+      </div>`;
+  }
+
+  const recent = filtered.slice(-24).reverse();
+  document.getElementById('history-table-wrap').innerHTML =
+    `<table class="hist-data-table">
+      <thead><tr><th>Time (UTC)</th><th>${esc(pInfo.label)}</th><th>Status</th></tr></thead>
+      <tbody>${recent.map(([t, v]) => {
+        const st = cellStatus(param, v);
+        return `<tr><td>${fmtTime(t)}</td><td class="qc-${st}">${pInfo.fmt(v)}</td><td>${st}</td></tr>`;
+      }).join('')}</tbody>
+    </table>`;
+}
+
+// ══════════════════════════════════════════════════════════
+// WATCHLIST
+// ══════════════════════════════════════════════════════════
+function toggleWatchlist(stream) {
+  S.watchlist.has(stream) ? S.watchlist.delete(stream) : S.watchlist.add(stream);
+  savePrefs();
+  document.querySelectorAll(`.watch-btn[data-stream="${CSS.escape(stream)}"]`).forEach(btn => {
+    btn.textContent = S.watchlist.has(stream) ? '★' : '☆';
+    btn.classList.toggle('watched', S.watchlist.has(stream));
+  });
+  document.querySelectorAll(`tr[data-stream="${CSS.escape(stream)}"]`).forEach(row =>
+    row.classList.toggle('watched', S.watchlist.has(stream))
+  );
+}
+
+// ══════════════════════════════════════════════════════════
+// CONNECTION BADGE
+// ══════════════════════════════════════════════════════════
+function setBadge(state) {
+  const el = document.getElementById('conn-badge');
+  el.className   = `badge badge-${state}`;
+  const labels   = { live: 'Live', error: 'Error', stale: 'Stale data', connecting: 'Loading…' };
+  el.textContent = labels[state] ?? 'Loading…';
+  if (state === 'stale' && S.data?.generated) {
+    const ageMin = Math.round((Date.now() - S.data.generated) / 60_000);
+    el.title = `qc_current.json is ${ageMin}min old — check backend.py is running`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// SETTINGS
+// ══════════════════════════════════════════════════════════
+function openSettings() {
+  const getEl = id => document.getElementById(id);
+  const thr = S.prefs.thresholds;
+  getEl('cfg-url').value    = S.prefs.dataUrl;
+  getEl('cfg-fdsnws').value = S.prefs.fdsnws;
+  getEl('thr-avail-warn').value    = thr.availability?.warn    ?? '';
+  getEl('thr-avail-alert').value   = thr.availability?.alert   ?? '';
+  getEl('thr-delay-warn').value    = thr.delay?.warn            ?? '';
+  getEl('thr-delay-alert').value   = thr.delay?.alert           ?? '';
+  getEl('thr-latency-warn').value  = thr.latency?.warn          ?? '';
+  getEl('thr-latency-alert').value = thr.latency?.alert         ?? '';
+  getEl('thr-timing-warn').value   = thr.timing_quality?.warn   ?? '';
+  getEl('thr-timing-alert').value  = thr.timing_quality?.alert  ?? '';
+  getEl('thr-gaps-warn').value     = thr.gaps_count?.warn       ?? '';
+  getEl('thr-gaps-alert').value    = thr.gaps_count?.alert      ?? '';
+  getEl('thr-overlaps-warn').value     = thr.overlaps_count?.warn  ?? '';
+  getEl('thr-overlaps-alert').value    = thr.overlaps_count?.alert ?? '';
+  getEl('thr-spikes-warn').value       = thr.spikes_count?.warn    ?? '';
+  getEl('thr-spikes-alert').value      = thr.spikes_count?.alert   ?? '';
+  document.getElementById('settings-modal').style.display = 'flex';
+}
+
+function closeSettings() {
+  document.getElementById('settings-modal').style.display = 'none';
+}
+
+function applySettings() {
+  const v = id => { const el = document.getElementById(id); return el?.value?.trim(); };
+  const n = id => { const val = parseFloat(v(id)); return isNaN(val) ? null : val; };
+
+  const newUrl = v('cfg-url') || DEFAULTS.dataUrl;
+  const changed = newUrl !== S.prefs.dataUrl;
+
+  S.prefs.dataUrl = newUrl;
+  S.prefs.fdsnws  = v('cfg-fdsnws') || '';
+  S.prefs.thresholds = {
+    availability:   { warn: n('thr-avail-warn'),    alert: n('thr-avail-alert'),    lowerWorse: true  },
+    delay:          { warn: n('thr-delay-warn'),     alert: n('thr-delay-alert'),    lowerWorse: false },
+    latency:        { warn: n('thr-latency-warn'),   alert: n('thr-latency-alert'),  lowerWorse: false },
+    timing_quality: { warn: n('thr-timing-warn'),    alert: n('thr-timing-alert'),   lowerWorse: true  },
+    gaps_count:     { warn: n('thr-gaps-warn'),      alert: n('thr-gaps-alert'),     lowerWorse: false },
+    overlaps_count: { warn: n('thr-overlaps-warn'),  alert: n('thr-overlaps-alert'), lowerWorse: false },
+    spikes_count:   { warn: n('thr-spikes-warn'),    alert: n('thr-spikes-alert'),   lowerWorse: false },
+  };
+  savePrefs();
+  closeSettings();
+  if (changed) { S.data = null; fetchData(); } else if (S.data) render();
+}
+
+function resetSettings() {
+  S.prefs.thresholds = JSON.parse(JSON.stringify(DEFAULTS.thresholds));
+  openSettings();
+}
+
+// ══════════════════════════════════════════════════════════
+// PERSISTENCE
+// ══════════════════════════════════════════════════════════
+function savePrefs() {
+  try {
+    localStorage.setItem('qclog2', JSON.stringify({
+      dataUrl:       S.prefs.dataUrl,
+      fdsnws:        S.prefs.fdsnws,
+      refreshMs:     S.refreshMs,
+      theme:         S.theme,
+      thresholds:    S.prefs.thresholds,
+      watchlist:     [...S.watchlist],
+      notifEnabled:  S.notifEnabled,
+      watchlistOnly: S.watchlistOnly,
+      events:        S.events.slice(0, 500),
+      prevStatus:    S.prevStatus,
+    }));
+  } catch(_) {}
+}
+
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem('qclog2') || '{}');
+    if (p.dataUrl)    S.prefs.dataUrl    = p.dataUrl;
+    if (p.fdsnws)     S.prefs.fdsnws     = p.fdsnws;
+    if (p.refreshMs)  S.refreshMs        = p.refreshMs;
+    if (p.theme)      S.theme            = p.theme;
+    if (p.thresholds) S.prefs.thresholds = { ...S.prefs.thresholds, ...p.thresholds };
+    if (p.watchlist)     S.watchlist        = new Set(p.watchlist);
+    if (p.notifEnabled)  S.notifEnabled     = p.notifEnabled;
+    if (p.watchlistOnly) S.watchlistOnly    = p.watchlistOnly;
+    if (Array.isArray(p.events))  S.events     = p.events;
+    if (p.prevStatus && typeof p.prevStatus === 'object') S.prevStatus = p.prevStatus;
+  } catch(_) {}
+}
+
+async function loadDeploymentConfig() {
+  try {
+    const resp = await fetch('config.json');
+    if (!resp.ok) return;
+    const cfg  = await resp.json();
+    const saved = JSON.parse(localStorage.getItem('qclog2') || '{}');
+    if (!saved.dataUrl && cfg.qc_url)  S.prefs.dataUrl = cfg.qc_url;
+    if (!saved.fdsnws  && cfg.fdsnws)  S.prefs.fdsnws  = cfg.fdsnws;
+  } catch(_) {}
+}
+
+// ══════════════════════════════════════════════════════════
+// EXPORT CSV
+// ══════════════════════════════════════════════════════════
+function exportCSV() {
+  const params = S.visibleParams;
+  const header = ['Stream', 'Network', 'Station', 'Location', 'Channel', 'Overall',
+    ...params.map(p => PARAMS[p]?.label ?? p),
+    ...params.map(p => (PARAMS[p]?.label ?? p) + '_time')];
+  const rows   = [header];
+  for (const [sid, sdata] of Object.entries(S.data?.streams || {})) {
+    const [net,sta,loc,cha] = sid.split('.');
+    rows.push([
+      sid, net, sta, loc||'', cha, streamStatus(sdata),
+      ...params.map(p => sdata[p]?.v ?? ''),
+      ...params.map(p => sdata[p]?.t ? new Date(sdata[p].t).toISOString() : ''),
+    ]);
+  }
+  const csv  = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a    = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(blob),
+    download: `qclog2_${new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')}.csv`,
+  });
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ══════════════════════════════════════════════════════════
+// EVENT WIRING
+// ══════════════════════════════════════════════════════════
+function initEvents() {
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab =>
+    tab.addEventListener('click', () => switchView(tab.dataset.view))
+  );
+
+  document.getElementById('search').addEventListener('input', e => {
+    S.filter.search = e.target.value.trim();
+    if (S.view === 'table') renderTable();
+    if (S.view === 'grid')  renderGrid();
+  });
+  document.getElementById('filter-net').addEventListener('change', e => {
+    S.filter.net = e.target.value;
+    if (S.view === 'table') renderTable();
+    if (S.view === 'grid')  renderGrid();
+  });
+  document.getElementById('filter-param').addEventListener('change', e => {
+    S.filter.param = e.target.value;
+    if (S.view === 'table') renderTable();
+    if (S.view === 'grid')  renderGrid();
+  });
+  document.getElementById('filter-status').addEventListener('change', e => {
+    S.filter.status = e.target.value;
+    if (S.view === 'table') renderTable();
+    if (S.view === 'grid')  renderGrid();
+  });
+  document.getElementById('status-counts').addEventListener('click', e => {
+    const sc = e.target.closest('.scount');
+    if (!sc) return;
+    S.filter.status = S.filter.status === sc.dataset.filter ? '' : sc.dataset.filter;
+    document.getElementById('filter-status').value = S.filter.status;
+    if (S.view === 'table') renderTable();
+    if (S.view === 'grid')  renderGrid();
+  });
+
+  // History load button
+  document.getElementById('hist-load-btn')
+    ?.addEventListener('click', loadHistoryChart);
+  document.getElementById('refresh-sel').addEventListener('change', e => {
+    S.refreshMs = +e.target.value; savePrefs();
+  });
+  document.getElementById('refresh-now').addEventListener('click', () => {
+    clearTimeout(S.mainTimer); clearInterval(S.cdTimer); fetchData();
+  });
+  document.getElementById('export-csv').addEventListener('click', exportCSV);
+  document.getElementById('settings-btn').addEventListener('click',   openSettings);
+  document.getElementById('settings-close').addEventListener('click', closeSettings);
+  document.getElementById('settings-apply').addEventListener('click', applySettings);
+  document.getElementById('settings-reset').addEventListener('click', resetSettings);
+  document.getElementById('settings-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeSettings();
+  });
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    S.theme = S.theme === 'dark' ? 'light' : 'dark';
+    document.body.classList.toggle('dark', S.theme === 'dark');
+    savePrefs();
+    if (S.uplot && S.detailStream) drawChart();
+  });
+  document.getElementById('panel-close').addEventListener('click', closeChart);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeChart(); });
+
+  // Sort by column header click
+  document.getElementById('qc-thead').addEventListener('click', e => {
+    const th = e.target.closest('th[data-sort]');
+    if (!th) return;
+    const key = th.dataset.sort;
+    S.sort = { key, asc: S.sort.key === key ? !S.sort.asc : true };
+    renderTable();
+  });
+
+  // Cell click → open chart
+  document.getElementById('qc-tbody').addEventListener('click', e => {
+    const watchBtn = e.target.closest('.watch-btn');
+    const cell     = e.target.closest('.qc-cell[data-param]');
+    if (watchBtn) {
+      e.stopPropagation();
+      toggleWatchlist(watchBtn.dataset.stream);
+      return;
+    }
+    if (cell) {
+      openChart(cell.dataset.stream, cell.dataset.param);
+      return;
+    }
+  });
+
+  // Time range buttons — chart panel and history view handled separately
+  document.querySelectorAll('.tr-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const inHistory = !!btn.closest('#view-history');
+      btn.closest('.time-range-btns')?.querySelectorAll('.tr-btn')
+        .forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      if (!inHistory) {
+        S.histRange = btn.dataset.range;
+        if (S.detailStream) loadChartData();
+      }
+    });
+  });
+
+  // Watchlist-only toggle
+  document.getElementById('watchlist-only-btn').addEventListener('click', () => {
+    S.watchlistOnly = !S.watchlistOnly;
+    document.getElementById('watchlist-only-btn').classList.toggle('active', S.watchlistOnly);
+    savePrefs();
+    if (S.view === 'table') renderTable();
+    if (S.view === 'grid')  renderGrid();
+  });
+
+  // Notification toggle
+  document.getElementById('notif-toggle').addEventListener('click', toggleNotifications);
+
+  // Overlay view
+  document.getElementById('cmp-load-btn').addEventListener('click', loadCompareChart);
+  document.getElementById('cmp-all-btn').addEventListener('click', () => setCmpSelection(true));
+  document.getElementById('cmp-none-btn').addEventListener('click', () => setCmpSelection(false));
+  document.getElementById('cmp-watched-btn').addEventListener('click', () => {
+    document.querySelectorAll('.cmp-cb').forEach(cb => {
+      cb.checked = S.watchlist.has(cb.value);
+      cb.closest('.cmp-cb-label').classList.toggle('checked', cb.checked);
+    });
+    document.querySelectorAll('.cmp-net-cb').forEach(ncb => {
+      const group = ncb.closest('.cmp-net-group');
+      const cbs = [...group.querySelectorAll('.cmp-cb')];
+      ncb.checked = cbs.length > 0 && cbs.every(c => c.checked);
+    });
+  });
+  document.getElementById('cmp-top10-btn').addEventListener('click', () => selectTopN(10));
+  document.getElementById('cmp-search').addEventListener('input', populateCompareStreams);
+  document.getElementById('cmp-param').addEventListener('change', populateCompareStreams);
+  document.querySelectorAll('#view-compare .tr-btn').forEach(btn =>
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#view-compare .tr-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      S.cmpRange = btn.dataset.range;
+    })
+  );
+
+  // Heatmap view
+  document.getElementById('hm-load-btn').addEventListener('click', loadHeatmap);
+  document.querySelectorAll('#view-heatmap .tr-btn').forEach(btn =>
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#view-heatmap .tr-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      S.hmRange = btn.dataset.range;
+    })
+  );
+
+  // Events view
+  document.getElementById('events-clear-btn').addEventListener('click', () => {
+    S.events = [];
+    renderEvents();
+    updateEventsBadge();
+  });
+
+  // Resize chart panel when window resizes
+  window.addEventListener('resize', () => {
+    if (S.uplot && S.detailStream) {
+      const wrap = document.getElementById('chart-wrap');
+      S.uplot.setSize({ width: wrap.clientWidth, height: 220 });
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════
+// BOOTSTRAP
+// ══════════════════════════════════════════════════════════
+async function init() {
+  loadPrefs();
+  await loadDeploymentConfig();
+
+  document.body.classList.toggle('dark', S.theme === 'dark');
+  document.getElementById('refresh-sel').value = String(S.refreshMs);
+  document.getElementById('watchlist-only-btn').classList.toggle('active', S.watchlistOnly);
+  updateNotifButton();
+
+  initEvents();
+  setBadge('connecting');
+  fetchData();
+}
+
+// ══════════════════════════════════════════════════════════
+// EVENTS / OUTAGE LOG
+// ══════════════════════════════════════════════════════════
+function detectEvents(data) {
+  const now = Date.now();
+  for (const [stream, sdata] of Object.entries(data.streams || {})) {
+    const newSt = streamStatus(sdata);
+    const oldSt = S.prevStatus[stream];
+    if (oldSt !== undefined && oldSt !== newSt) {
+      // Mark any open event for this stream as resolved
+      for (let i = 0; i < S.events.length; i++) {
+        if (S.events[i].stream === stream && S.events[i].resolvedTs === null) {
+          S.events[i].resolvedTs = now;
+          break;
+        }
+      }
+      S.events.unshift({ ts: now, stream, from: oldSt, to: newSt, resolvedTs: null });
+      if (S.events.length > 500) S.events.length = 500;
+      maybeNotify(stream, oldSt, newSt);
+    }
+    S.prevStatus[stream] = newSt;
+  }
+  if (S.view === 'events') renderEvents();
+}
+
+function updateEventsBadge() {
+  const badge = document.getElementById('events-badge');
+  const alertCount = S.events.filter(e => e.to === 'alert' || e.to === 'nodata').length;
+  if (alertCount > 0) {
+    badge.textContent = alertCount;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function renderEvents() {
+  const tbody  = document.getElementById('events-tbody');
+  const empty  = document.getElementById('events-empty');
+  const info   = document.getElementById('events-info');
+  const oldest = S.events.length ? fmtTime(S.events[S.events.length - 1].ts) : '';
+  info.textContent = S.events.length
+    ? `${S.events.length} event${S.events.length !== 1 ? 's' : ''} · since ${oldest}`
+    : '';
+  if (!S.events.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = S.events.map(ev => {
+    const dur = ev.resolvedTs
+      ? fmtSec((ev.resolvedTs - ev.ts) / 1000)
+      : `<em style="color:var(--text3)">active</em>`;
+    return `<tr>
+      <td>${fmtTime(ev.ts)}</td>
+      <td class="ev-stream">${esc(ev.stream)}</td>
+      <td><span class="ev-from qc-${ev.from}">${ev.from}</span></td>
+      <td><span class="ev-to qc-${ev.to}">${ev.to}</span></td>
+      <td>${dur}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════
+// BROWSER NOTIFICATIONS
+// ══════════════════════════════════════════════════════════
+function updateNotifButton() {
+  const btn = document.getElementById('notif-toggle');
+  btn.classList.toggle('active', S.notifEnabled);
+  btn.title = S.notifEnabled ? 'Notifications on — click to disable' : 'Enable browser notifications';
+}
+
+async function toggleNotifications() {
+  if (!('Notification' in window)) {
+    alert('Browser notifications are not supported in this browser.');
+    return;
+  }
+  if (!S.notifEnabled) {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { alert('Notification permission denied.'); return; }
+    S.notifEnabled = true;
+  } else {
+    S.notifEnabled = false;
+  }
+  updateNotifButton();
+  savePrefs();
+}
+
+function maybeNotify(stream, from, to) {
+  if (!S.notifEnabled || Notification.permission !== 'granted') return;
+  if (to === 'alert' || to === 'nodata') {
+    new Notification(`QC ${to.toUpperCase()}: ${stream}`, {
+      body: `Status changed ${from} → ${to}`,
+      tag:  stream,
+    });
+  } else if (from === 'alert' && to === 'ok') {
+    new Notification(`QC Recovered: ${stream}`, {
+      body: 'Status returned to OK',
+      tag:  stream,
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// OVERLAY VIEW  (multi-stream overlay chart)
+// ══════════════════════════════════════════════════════════
+function populateCompareStreams() {
+  const list = document.getElementById('cmp-stream-list');
+  if (!list || !S.data) return;
+
+  const param   = document.getElementById('cmp-param').value;
+  const checked = new Set(
+    [...document.querySelectorAll('.cmp-cb:checked')].map(cb => cb.value)
+  );
+  const filterQ = (document.getElementById('cmp-search')?.value ?? '').toLowerCase();
+
+  // Group streams by network, attach current value for display
+  const nets = {};
+  for (const [sid, sdata] of Object.entries(S.data.streams || {})) {
+    const parts = sid.split('.');
+    const net = parts[0];
+    if (filterQ && !sid.toLowerCase().includes(filterQ)) continue;
+    if (!nets[net]) nets[net] = [];
+    const entry = sdata[param];
+    nets[net].push({ sid, value: entry?.v ?? null, status: cellStatus(param, entry?.v ?? null) });
+  }
+
+  const totalVisible = Object.values(nets).reduce((s, a) => s + a.length, 0);
+  document.getElementById('cmp-stream-count').textContent =
+    `${totalVisible} stream${totalVisible !== 1 ? 's' : ''}`;
+
+  list.innerHTML = Object.entries(nets).sort().map(([net, items]) => {
+    const allChecked = items.every(({sid}) => checked.has(sid));
+    const rows = items.map(({sid, value, status}) => {
+      const isChecked = checked.has(sid);
+      const parts = sid.split('.');
+      const label = `${parts[1] ?? sid}${parts[2] ? '.'+parts[2] : ''} <span class="cmp-loc">${esc(parts[3] ?? '')}</span>`;
+      const valStr = value == null ? '<span class="cmp-nodata">—</span>'
+        : `<span class="cmp-val cmp-val-${status}">${(PARAMS[param]?.fmt ?? (v=>v))(value)}</span>`;
+      return `<label class="cmp-cb-label${isChecked ? ' checked' : ''}">
+        <input type="checkbox" class="cmp-cb" value="${esc(sid)}"${isChecked ? ' checked' : ''}>
+        <span class="cmp-stream-name">${label}</span>${valStr}
+      </label>`;
+    }).join('');
+    return `<div class="cmp-net-group">
+      <div class="cmp-net-hdr">
+        <label class="cmp-net-cb-wrap" title="Select all ${esc(net)}">
+          <input type="checkbox" class="cmp-net-cb" data-net="${esc(net)}"${allChecked ? ' checked' : ''}>
+          <strong>${esc(net)}</strong>
+        </label>
+        <span class="cmp-net-count">${items.length}</span>
+      </div>
+      <div class="cmp-net-streams">${rows}</div>
+    </div>`;
+  }).join('');
+
+  // wire stream checkboxes
+  list.querySelectorAll('.cmp-cb').forEach(cb =>
+    cb.addEventListener('change', () => {
+      cb.closest('.cmp-cb-label').classList.toggle('checked', cb.checked);
+      _updateNetGroupHeader(cb.closest('.cmp-net-group'));
+    })
+  );
+  // wire network header checkboxes
+  list.querySelectorAll('.cmp-net-cb').forEach(ncb =>
+    ncb.addEventListener('change', () => {
+      const group = ncb.closest('.cmp-net-group');
+      group.querySelectorAll('.cmp-cb').forEach(cb => {
+        cb.checked = ncb.checked;
+        cb.closest('.cmp-cb-label').classList.toggle('checked', ncb.checked);
+      });
+    })
+  );
+}
+
+function _updateNetGroupHeader(group) {
+  if (!group) return;
+  const cbs = [...group.querySelectorAll('.cmp-cb')];
+  const ncb = group.querySelector('.cmp-net-cb');
+  if (ncb) ncb.checked = cbs.length > 0 && cbs.every(c => c.checked);
+}
+
+function setCmpSelection(state) {
+  document.querySelectorAll('.cmp-cb').forEach(cb => {
+    cb.checked = state;
+    cb.closest('.cmp-cb-label').classList.toggle('checked', state);
+  });
+  document.querySelectorAll('.cmp-net-cb').forEach(ncb => { ncb.checked = state; });
+}
+
+function selectTopN(n) {
+  const param = document.getElementById('cmp-param').value;
+  const thr   = S.prefs.thresholds[param];
+  // Score each stream: alert=3, warn=2, nodata=1, ok=0
+  const statusScore = { alert: 3, warn: 2, nodata: 1, ok: 0 };
+  const streams = Object.entries(S.data?.streams || {})
+    .map(([sid, sdata]) => {
+      const v  = sdata[param]?.v ?? null;
+      const st = cellStatus(param, v);
+      return { sid, score: statusScore[st] ?? 0 };
+    })
+    .sort((a, b) => b.score - a.score || a.sid.localeCompare(b.sid));
+
+  const top = new Set(streams.slice(0, n).map(s => s.sid));
+  document.querySelectorAll('.cmp-cb').forEach(cb => {
+    cb.checked = top.has(cb.value);
+    cb.closest('.cmp-cb-label').classList.toggle('checked', cb.checked);
+    _updateNetGroupHeader(cb.closest('.cmp-net-group'));
+  });
+  document.querySelectorAll('.cmp-net-cb').forEach(ncb => {
+    const group = ncb.closest('.cmp-net-group');
+    const cbs = [...group.querySelectorAll('.cmp-cb')];
+    ncb.checked = cbs.length > 0 && cbs.every(c => c.checked);
+  });
+}
+
+async function loadCompareChart() {
+  const streams = [...document.querySelectorAll('.cmp-cb:checked')].map(cb => cb.value);
+  if (!streams.length) {
+    document.getElementById('cmp-chart-wrap').innerHTML =
+      '<div class="chart-loading">Select at least one stream.</div>';
+    return;
+  }
+  const param   = document.getElementById('cmp-param').value;
+  const range   = S.cmpRange;
+  const urlMap  = { '1h': 'qc_24h.json', '6h': 'qc_24h.json', '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
+  const base    = S.prefs.dataUrl.replace(/[^/]*$/, '') || './';
+  const jsonUrl = base + (urlMap[range] ?? 'qc_24h.json');
+
+  document.getElementById('cmp-chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
+  document.getElementById('cmp-legend').innerHTML = '';
+  document.getElementById('cmp-stats').innerHTML = '';
+
+  try {
+    const r = await fetch(jsonUrl + '?_=' + Date.now());
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    drawCompareChart(data, streams, param, range);
+  } catch(_) {
+    document.getElementById('cmp-chart-wrap').innerHTML =
+      '<div class="chart-loading">Failed to load data.</div>';
+  }
+}
+
+function posTooltip(tooltip, cx, cy) {
+  const tw = tooltip.offsetWidth  || 220;
+  const th = tooltip.offsetHeight || 80;
+  tooltip.style.left = (cx + 14 + tw > window.innerWidth  ? cx - tw - 10 : cx + 14) + 'px';
+  tooltip.style.top  = (cy - th / 2 < 4 ? 4 : cy + th / 2 > window.innerHeight - 4 ? window.innerHeight - th - 4 : cy - th / 2) + 'px';
+}
+
+function drawCompareChart(histData, streams, param, range) {
+  const rangeMs = { '1h': 3600e3, '6h': 6*3600e3, '24h': 24*3600e3, '7d': 7*24*3600e3 };
+  const cutoff  = Date.now() - (rangeMs[range] ?? 24*3600e3);
+  const pInfo   = PARAMS[param] ?? { label: param, unit: '', fmt: v => v == null ? '—' : String(v) };
+
+  // Collect all timestamps (bins are aligned across streams)
+  const tsSet = new Set();
+  streams.forEach(s =>
+    (histData.streams?.[s]?.[param] ?? [])
+      .filter(([t]) => t >= cutoff)
+      .forEach(([t]) => tsSet.add(t))
+  );
+  if (!tsSet.size) {
+    document.getElementById('cmp-chart-wrap').innerHTML =
+      '<div class="chart-loading">No data for selected streams / time range.</div>';
+    return;
+  }
+  const xs = [...tsSet].sort((a, b) => a - b).map(t => t / 1000);
+  const tsIdx = new Map(xs.map((t, i) => [Math.round(t * 1000), i]));
+
+  const seriesData = streams.map(s => {
+    const arr = new Array(xs.length).fill(null);
+    (histData.streams?.[s]?.[param] ?? [])
+      .filter(([t]) => t >= cutoff)
+      .forEach(([t, v]) => { const i = tsIdx.get(t); if (i !== undefined) arr[i] = v; });
+    return arr;
+  });
+
+  const palette = streams.map((_, i) =>
+    `hsl(${Math.round(i * 360 / streams.length)},65%,${document.body.classList.contains('dark') ? '60%' : '45%'})`
+  );
+
+  const isDark  = document.body.classList.contains('dark');
+  const textCol = isDark ? '#94a3b8' : '#475569';
+  const gridCol = isDark ? '#1e293b' : '#e2e8f0';
+  const wrap    = document.getElementById('cmp-chart-wrap');
+  wrap.innerHTML = '';
+
+  const opts = {
+    width:  wrap.clientWidth || 700,
+    height: 280,
+    cursor: { show: true },
+    legend: { show: false },
+    series: [
+      {},
+      ...streams.map((s, i) => ({
+        label:  s,
+        stroke: palette[i],
+        width:  1.5,
+        spanGaps: false,
+        value: (u, v) => v == null ? '—' : pInfo.fmt(v),
+      })),
+    ],
+    axes: [
+      { stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol }, values: fmtXAxis },
+      { label: pInfo.unit, stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol },
+        values: (u, vals) => vals.map(v => v == null ? '' : pInfo.fmt(v)) },
+    ],
+    scales: { x: { time: true } },
+    padding: [10, 12, 0, 10],
+  };
+
+  // Hover tooltip
+  opts.hooks = { setCursor: [u => {
+    const tt = document.getElementById('chart-tooltip');
+    const { idx } = u.cursor;
+    if (idx == null || u.cursor.left < 0) { tt.style.display = 'none'; return; }
+    const rect = u.over.getBoundingClientRect();
+    const cx = rect.left + u.cursor.left, cy = rect.top + u.cursor.top;
+    const ts = new Date(xs[idx] * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    const rows = streams
+      .map((s, i) => ({ s, v: seriesData[i][idx], col: palette[i] }))
+      .filter(x => x.v != null);
+    tt.innerHTML = `<div class="ct-time">${ts}</div>` +
+      (rows.length ? rows.slice(0, 14).map(({s, v, col}) =>
+        `<div class="ct-row"><span class="ct-dot" style="background:${col}"></span>` +
+        `<span class="ct-lbl">${esc(s)}</span>` +
+        `<span class="ct-val">${pInfo.fmt(v)}</span></div>`
+      ).join('') : '<div class="ct-time">No data at cursor</div>') +
+      (rows.length > 14 ? `<div class="ct-more">+${rows.length - 14} more</div>` : '');
+    tt.style.display = 'block';
+    posTooltip(tt, cx, cy);
+  }]};
+
+  if (S.cmpPlot) { S.cmpPlot.destroy(); S.cmpPlot = null; }
+  S.cmpPlot = new uPlot(opts, [xs, ...seriesData], wrap);
+  S.cmpPlot.over.addEventListener('mouseleave', () => {
+    document.getElementById('chart-tooltip').style.display = 'none';
+  });
+
+  // Custom legend
+  document.getElementById('cmp-legend').innerHTML =
+    streams.map((s, i) =>
+      `<span class="cmp-legend-item">
+        <span class="cmp-legend-swatch" style="background:${palette[i]}"></span>${esc(s)}
+      </span>`
+    ).join('');
+
+  // Stats: count streams with data
+  const withData = streams.filter((_,i) => seriesData[i].some(v => v != null));
+  document.getElementById('cmp-stats').textContent =
+    `${withData.length} of ${streams.length} stream${streams.length !== 1 ? 's' : ''} have data · ${range}`;
+}
+
+// ══════════════════════════════════════════════════════════
+// HEATMAP VIEW
+// ══════════════════════════════════════════════════════════
+async function loadHeatmap() {
+  const param  = document.getElementById('hm-param').value;
+  const range  = S.hmRange;
+  const urlMap = { '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
+  const base   = S.prefs.dataUrl.replace(/[^/]*$/, '') || './';
+  const jsonUrl = base + (urlMap[range] ?? 'qc_24h.json');
+
+  document.getElementById('heatmap-labels').innerHTML = '<div class="hm-label" style="color:var(--text3)">Loading…</div>';
+  document.getElementById('heatmap-canvas-wrap').innerHTML = '';
+
+  try {
+    const r = await fetch(jsonUrl + '?_=' + Date.now());
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    renderHeatmap(data, param, range);
+  } catch(_) {
+    document.getElementById('heatmap-labels').innerHTML =
+      '<div class="hm-label" style="color:var(--s-alert)">Failed to load.</div>';
+  }
+}
+
+function renderHeatmap(histData, param, range) {
+  const streams = Object.keys(histData.streams || {}).sort();
+  if (!streams.length) {
+    document.getElementById('heatmap-labels').innerHTML =
+      '<div class="hm-label" style="color:var(--text3)">No data.</div>';
+    return;
+  }
+
+  const binMs   = range === '7d' ? 3600e3 : 10 * 60e3;
+  const rangeMs = range === '7d' ? 7 * 24 * 3600e3 : 24 * 3600e3;
+  const now     = Date.now();
+  const cutoff  = now - rangeMs;
+
+  // Build ordered bin list
+  const firstBin = Math.ceil(cutoff / binMs) * binMs;
+  const bins = [];
+  for (let t = firstBin; t <= now; t += binMs) bins.push(t);
+
+  const CELL_W  = range === '7d' ? 6 : 5;
+  const CELL_H  = 20;
+  const LABEL_W = 160;
+  const canvasW = bins.length * CELL_W;
+  const canvasH = streams.length * CELL_H;
+
+  // Status colours (resolved from CSS vars via computed style fallback)
+  const isDark  = document.body.classList.contains('dark');
+  const colMap  = {
+    ok:     '#16a34a',
+    warn:   '#ca8a04',
+    alert:  '#dc2626',
+    nodata: isDark ? '#1e293b' : '#e2e8f0',
+    info:   isDark ? '#263347' : '#f1f5f9',
+  };
+
+  // Build canvas
+  const wrap = document.getElementById('heatmap-canvas-wrap');
+  wrap.innerHTML = '';
+  const xaxis = document.createElement('div');
+  xaxis.id = 'heatmap-xaxis';
+  xaxis.style.cssText = `width:${canvasW}px;height:20px;position:sticky;top:0;z-index:2;background:var(--surface2);border-bottom:1px solid var(--border);box-sizing:border-box;`;
+
+  // X-axis labels (show ~8 labels)
+  const labelEvery = Math.max(1, Math.floor(bins.length / 8));
+  bins.forEach((t, i) => {
+    if (i % labelEvery !== 0) return;
+    const lbl = document.createElement('span');
+    const d = new Date(t);
+    lbl.textContent = range === '7d'
+      ? `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')} ${String(d.getUTCHours()).padStart(2,'0')}h`
+      : `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
+    lbl.style.cssText = `position:absolute;left:${i * CELL_W}px;font-size:9px;color:var(--text3);white-space:nowrap;`;
+    xaxis.appendChild(lbl);
+  });
+  wrap.appendChild(xaxis);
+
+  const canvas  = document.createElement('canvas');
+  canvas.id     = 'heatmap-canvas';
+  canvas.width  = canvasW;
+  canvas.height = canvasH;
+  canvas.style.cssText = 'display:block;cursor:crosshair;';
+  wrap.appendChild(canvas);
+
+  const ctx = canvas.getContext('2d');
+
+  // Draw cells
+  streams.forEach((stream, si) => {
+    const raw     = histData.streams?.[stream]?.[param] ?? [];
+    const lookup  = new Map(raw.map(([t, v]) => [Math.round(t / binMs) * binMs, v]));
+    bins.forEach((bin, bi) => {
+      const v  = lookup.get(bin) ?? null;
+      const st = cellStatus(param, v);
+      ctx.fillStyle = colMap[st] ?? colMap.nodata;
+      ctx.fillRect(bi * CELL_W, si * CELL_H, CELL_W - 1, CELL_H - 1);
+    });
+  });
+
+  // Stream labels
+  const labelsDiv = document.getElementById('heatmap-labels');
+  labelsDiv.style.cssText = `width:${LABEL_W}px;padding-top:20px;height:${canvasH + 20}px;`;
+  labelsDiv.innerHTML = streams.map(s => {
+    const parts = s.split('.');
+    const net  = parts[0] ?? '';
+    const sta  = parts[1] ?? '';
+    const chan = parts[3] ?? '';
+    return `<div class="hm-label" style="height:${CELL_H}px;width:${LABEL_W}px;" title="${esc(s)}">` +
+      `<span class="hm-net">${esc(net)}</span>` +
+      `<span class="hm-dot">.</span>` +
+      `<span class="hm-sta">${esc(sta)}</span>` +
+      `<span class="hm-dot">.</span>` +
+      `<span class="hm-chan">${esc(chan)}</span>` +
+      `</div>`;
+  }).join('');
+
+  // Legend
+  document.getElementById('heatmap-legend').innerHTML =
+    ['ok','warn','alert','nodata'].map(st =>
+      `<span class="hm-legend-swatch" style="background:${colMap[st]}"></span><span>${st}</span>`
+    ).join('') + `<span style="margin-left:8px;color:var(--text3)">${streams.length} streams · ${bins.length} bins</span>`;
+
+  // Tooltip on hover
+  const tooltip = document.getElementById('heatmap-tooltip');
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const bi = Math.floor(mx / CELL_W);
+    const si = Math.floor(my / CELL_H);
+    if (bi < 0 || bi >= bins.length || si < 0 || si >= streams.length) {
+      tooltip.style.display = 'none'; return;
+    }
+    const stream = streams[si];
+    const raw    = histData.streams?.[stream]?.[param] ?? [];
+    const lookup = new Map(raw.map(([t,v]) => [Math.round(t / binMs) * binMs, v]));
+    const v      = lookup.get(bins[bi]) ?? null;
+    const pInfo  = PARAMS[param] ?? { fmt: v => v == null ? '—' : String(v) };
+    const d      = new Date(bins[bi]);
+    tooltip.innerHTML =
+      `<strong>${esc(stream)}</strong><br>` +
+      `${d.toUTCString().slice(5,22)} UTC<br>` +
+      `${param.replace(/_/g,' ')}: <strong>${pInfo.fmt(v)}</strong>`;
+    tooltip.style.display = 'block';
+    const tw = tooltip.offsetWidth  || 180;
+    const th = tooltip.offsetHeight || 70;
+    tooltip.style.left = (e.clientX + 14 + tw > window.innerWidth  ? e.clientX - tw - 10 : e.clientX + 14) + 'px';
+    tooltip.style.top  = (e.clientY + 14 + th > window.innerHeight ? e.clientY - th - 10 : e.clientY + 14) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+}
+
+document.addEventListener('DOMContentLoaded', init);
