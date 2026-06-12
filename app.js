@@ -1639,7 +1639,7 @@ function drawCompareChart(histData, streams, param, from_ms, to_ms) {
   // Stats: count streams with data
   const withData = streams.filter((_,i) => seriesData[i].some(v => v != null));
   document.getElementById('cmp-stats').textContent =
-    `${withData.length} of ${streams.length} stream${streams.length !== 1 ? 's' : ''} have data · ${range}`;
+    `${withData.length} of ${streams.length} stream${streams.length !== 1 ? 's' : ''} have data · ${fmtRangeLabel(from_ms, to_ms)}`;
 }
 
 // ══════════════════════════════════════════════════════════
