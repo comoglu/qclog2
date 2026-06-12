@@ -202,7 +202,7 @@ def _write_24h(db, output_dir):
 
     _atomic_write(
         Path(output_dir) / 'qc_24h.json',
-        {'generated': now_ms, 'streams': streams}
+        {'generated': now_ms, 'bin_ms': bin_ms, 'streams': streams}
     )
 
 
@@ -230,7 +230,63 @@ def _write_7d(db, output_dir):
 
     _atomic_write(
         Path(output_dir) / 'qc_7d.json',
-        {'generated': now_ms, 'streams': streams}
+        {'generated': now_ms, 'bin_ms': 3_600_000, 'streams': streams}
+    )
+
+
+def _write_3d(db, output_dir):
+    """qc_3d.json — last 3 days at 10-minute resolution from qc_raw."""
+    now_ms  = int(time.time() * 1000)
+    cutoff  = now_ms - 3 * 24 * 3600 * 1000
+    bin_ms  = 10 * 60 * 1000
+
+    rows = db.execute('''
+        SELECT stream, parameter,
+               (time_ms / ?) * ? AS bin,
+               AVG(value) AS avg
+        FROM qc_raw
+        WHERE time_ms >= ?
+        GROUP BY stream, parameter, bin
+        ORDER BY stream, parameter, bin
+    ''', (bin_ms, bin_ms, cutoff)).fetchall()
+
+    streams = {}
+    for stream, param, bin_val, avg in rows:
+        if stream not in streams:
+            streams[stream] = {}
+        if param not in streams[stream]:
+            streams[stream][param] = []
+        streams[stream][param].append([bin_val, round(avg, 4)])
+
+    _atomic_write(
+        Path(output_dir) / 'qc_3d.json',
+        {'generated': now_ms, 'bin_ms': bin_ms, 'streams': streams}
+    )
+
+
+def _write_30d(db, output_dir):
+    """qc_30d.json — last 30 days at hourly resolution from qc_hourly."""
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - 30 * 24 * 3600 * 1000
+
+    rows = db.execute('''
+        SELECT stream, parameter, hour_ms, avg
+        FROM qc_hourly
+        WHERE hour_ms >= ?
+        ORDER BY stream, parameter, hour_ms
+    ''', (cutoff,)).fetchall()
+
+    streams = {}
+    for stream, param, hour_ms, avg in rows:
+        if stream not in streams:
+            streams[stream] = {}
+        if param not in streams[stream]:
+            streams[stream][param] = []
+        streams[stream][param].append([hour_ms, round(avg, 4)])
+
+    _atomic_write(
+        Path(output_dir) / 'qc_30d.json',
+        {'generated': now_ms, 'bin_ms': 3_600_000, 'streams': streams}
     )
 
 
@@ -415,7 +471,7 @@ class QCBackend(client.Application):
         self._db_path       = cfg.get('db_path',       str(Path(__file__).parent / 'qc.db'))
         self._output_dir    = cfg.get('output_dir',    str(Path(__file__).parent))
         self._json_interval = cfg.get('json_interval', 60)
-        self._raw_ret_h     = cfg.get('raw_retention_h', 25)
+        self._raw_ret_h     = cfg.get('raw_retention_h', 72)
         self._api_port      = cfg.get('api_port', 8765)
 
         self._db            = None
@@ -423,6 +479,7 @@ class QCBackend(client.Application):
         self._buf_limit     = 100
         self._last_json     = 0
         self._last_rollup   = 0
+        self._last_3d       = 0
         self._last_7d       = 0
         self._msg_count     = 0
         self._seen_streams  = set()
@@ -472,8 +529,13 @@ class QCBackend(client.Application):
                 _rollup_hourly(self._db, self._raw_ret_h)
                 self._last_rollup = now
 
+            if now - self._last_3d >= 600:
+                _write_3d(self._db, self._output_dir)
+                self._last_3d = now
+
             if now - self._last_7d >= 3600:
                 _write_7d(self._db, self._output_dir)
+                _write_30d(self._db, self._output_dir)
                 self._last_7d = now
 
         except Exception:
@@ -493,6 +555,7 @@ class QCBackend(client.Application):
         try:
             _write_current(self._db, self._output_dir)
             _write_24h(self._db, self._output_dir)
+            _write_3d(self._db, self._output_dir)
             _write_health(self._output_dir, len(self._seen_streams), self._msg_count)
             print(f'[qclog2] JSON written at {time.strftime("%H:%M:%S")}', flush=True)
         except Exception:

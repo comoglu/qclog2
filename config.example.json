@@ -2,7 +2,7 @@
   "db_path":            "/opt/seiscomp/var/run/qclog2/qc.db",
   "output_dir":         "/opt/seiscomp/var/run/qclog2",
   "json_interval":      60,
-  "raw_retention_h":    25,
+  "raw_retention_h":    72,
   "hourly_retention_d": 30,
   "fdsnws":             "/fdsnws",
   "api_port":           8765,

@@ -17,11 +17,11 @@ const PARAMS = {
 
 const PRESETS = [
   { label: 'Last 1 h',   ms: 3_600_000 },
-  { label: 'Last 3 h',   ms: 3 * 3_600_000 },
   { label: 'Last 6 h',   ms: 6 * 3_600_000 },
   { label: 'Last 12 h',  ms: 12 * 3_600_000 },
   { label: 'Last 24 h',  ms: 24 * 3_600_000 },
-  { label: 'Last 2 d',   ms: 2 * 86_400_000 },
+  { label: 'Last 36 h',  ms: 36 * 3_600_000 },
+  { label: 'Last 3 d',   ms: 3 * 86_400_000 },
   { label: 'Last 7 d',   ms: 7 * 86_400_000 },
   { label: 'Last 14 d',  ms: 14 * 86_400_000 },
   { label: 'Last 30 d',  ms: 30 * 86_400_000 },
@@ -199,6 +199,35 @@ async function fetchQCRange(from_ms, to_ms, param = null) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(r.status);
   return r.json();
+}
+
+function urlForSpan(spanMs) {
+  if (spanMs <= 24 * 3_600_000) return 'qc_24h.json';
+  if (spanMs <= 3 * 86_400_000) return 'qc_3d.json';
+  if (spanMs <= 7 * 86_400_000) return 'qc_7d.json';
+  return 'qc_30d.json';
+}
+
+async function fetchRange(pickerEl, param = null) {
+  const sel = pickerEl.querySelector('.tpick-sel');
+  const { from, to } = pickerRange(pickerEl);
+  if (sel.value === 'custom') {
+    return fetchQCRange(from, to, param);
+  }
+  const spanMs = Number(sel.value);
+  const r = await fetch(urlForSpan(spanMs) + '?_=' + Date.now());
+  if (!r.ok) throw new Error(r.status);
+  const data = await r.json();
+  // Trim to exact window; drop other params to reduce memory
+  for (const sd of Object.values(data.streams || {})) {
+    for (const p of Object.keys(sd)) {
+      if (param && p !== param) { delete sd[p]; continue; }
+      sd[p] = sd[p].filter(([t]) => t >= from && t <= to);
+    }
+  }
+  data.from = from;
+  data.to   = to;
+  return data;
 }
 
 function cellStatus(param, value) {
@@ -515,11 +544,9 @@ function closeChart() {
 async function loadChartData() {
   const picker = document.querySelector('#chart-panel .tpick');
   if (!picker) return;
-  const { from, to } = pickerRange(picker);
-
   document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
   try {
-    S.histData = await fetchQCRange(from, to, S.detailParam);
+    S.histData = await fetchRange(picker, S.detailParam);
     drawChart();
   } catch(_) {
     document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Failed to load history.</div>';
@@ -820,13 +847,13 @@ async function loadHistoryChart() {
     return;
   }
   const picker  = document.querySelector('#view-history .tpick');
-  const { from, to } = picker ? pickerRange(picker) : { from: Date.now() - 86_400_000, to: Date.now() };
+  if (!picker) return;
   wrap.innerHTML = '<div class="chart-loading">Loading…</div>';
   document.getElementById('history-stats').innerHTML = '';
   document.getElementById('history-table-wrap').innerHTML = '';
   try {
-    const data = await fetchQCRange(from, to, param);
-    drawHistoryChart(data, stream, param, from, to);
+    const data = await fetchRange(picker, param);
+    drawHistoryChart(data, stream, param, data.from, data.to);
   } catch(_) {
     wrap.innerHTML = '<div class="chart-loading">Failed to load history data.</div>';
   }
@@ -1494,15 +1521,14 @@ async function loadCompareChart() {
   }
   const param   = document.getElementById('cmp-param').value;
   const picker  = document.querySelector('#view-compare .tpick');
-  const { from, to } = picker ? pickerRange(picker) : { from: Date.now() - 86_400_000, to: Date.now() };
-
+  if (!picker) return;
   document.getElementById('cmp-chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
   document.getElementById('cmp-legend').innerHTML = '';
   document.getElementById('cmp-stats').innerHTML = '';
 
   try {
-    const data = await fetchQCRange(from, to, param);
-    drawCompareChart(data, streams, param, from, to);
+    const data = await fetchRange(picker, param);
+    drawCompareChart(data, streams, param, data.from, data.to);
   } catch(_) {
     document.getElementById('cmp-chart-wrap').innerHTML =
       '<div class="chart-loading">Failed to load data.</div>';
@@ -1622,14 +1648,13 @@ function drawCompareChart(histData, streams, param, from_ms, to_ms) {
 async function loadHeatmap() {
   const param  = document.getElementById('hm-param').value;
   const picker = document.querySelector('#view-heatmap .tpick');
-  const { from, to } = picker ? pickerRange(picker) : { from: Date.now() - 86_400_000, to: Date.now() };
-
+  if (!picker) return;
   document.getElementById('heatmap-labels').innerHTML = '<div class="hm-label" style="color:var(--text3)">Loading…</div>';
   document.getElementById('heatmap-canvas-wrap').innerHTML = '';
 
   try {
-    const data = await fetchQCRange(from, to, param);
-    renderHeatmap(data, param, from, to, data.bin_ms ?? 600_000);
+    const data = await fetchRange(picker, param);
+    renderHeatmap(data, param, data.from, data.to, data.bin_ms ?? 600_000);
   } catch(_) {
     document.getElementById('heatmap-labels').innerHTML =
       '<div class="hm-label" style="color:var(--s-alert)">Failed to load.</div>';
