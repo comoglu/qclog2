@@ -88,6 +88,12 @@ location /qclog2/ {
     try_files $uri $uri/ =404;
 }
 
+# On-demand QC query API (backend HTTP thread, default port 8765)
+location /api/ {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+
 # Proxy FDSNWS station service (adjust port to match your setup)
 location /fdsnws/ {
     proxy_pass http://localhost:8081;

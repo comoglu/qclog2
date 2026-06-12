@@ -14,9 +14,12 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 import traceback
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 from seiscomp import core, client, datamodel
 
@@ -244,6 +247,117 @@ def _write_health(output_dir, stream_count, msg_count):
     )
 
 
+# ── On-demand query API ──────────────────────────────────────────────────────
+
+class _APIHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler for arbitrary time-range QC queries.
+
+    GET /api/qc?from=<epoch_ms>&to=<epoch_ms>[&param=<name>]
+    Returns JSON compatible with the pre-built qc_24h/qc_7d files plus
+    a 'bin_ms' field so the frontend knows the resolution returned.
+
+    Resolution is chosen automatically:
+      span ≤ 2 h  → 1-min bins  (from qc_raw)
+      span ≤ 48 h → 10-min bins (from qc_raw)
+      span > 48 h → 1-h bins    (from qc_hourly, up to 31 days)
+    """
+    db_path: str = ''
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path.rstrip('/') != '/api/qc':
+            self.send_error(404)
+            return
+
+        qs = parse_qs(parsed.query)
+        try:
+            from_ms = int(qs['from'][0])
+            to_ms   = int(qs['to'][0])
+        except (KeyError, ValueError, IndexError):
+            self.send_error(400, 'Missing or invalid from / to (epoch ms)')
+            return
+
+        if to_ms <= from_ms:
+            self.send_error(400, 'to must be after from')
+            return
+
+        span = to_ms - from_ms
+        if span > 31 * 86_400_000:
+            self.send_error(400, 'Range exceeds 31 days')
+            return
+
+        param = qs.get('param', [None])[0]  # optional filter
+
+        # Pick resolution
+        if span <= 2 * 3_600_000:
+            bin_ms = 60_000          # 1 min
+        elif span <= 48 * 3_600_000:
+            bin_ms = 10 * 60_000     # 10 min
+        else:
+            bin_ms = 3_600_000       # 1 h
+
+        db = sqlite3.connect(self.db_path, check_same_thread=True)
+        try:
+            if span <= 48 * 3_600_000:
+                sql = ('SELECT stream, parameter, (time_ms/?) * ? AS bin, AVG(value) '
+                       'FROM qc_raw WHERE time_ms >= ? AND time_ms <= ?')
+                args: list = [bin_ms, bin_ms, from_ms, to_ms]
+                if param:
+                    sql += ' AND parameter = ?'
+                    args.append(param)
+                sql += ' GROUP BY stream, parameter, bin ORDER BY stream, parameter, bin'
+            else:
+                sql = ('SELECT stream, parameter, hour_ms AS bin, avg '
+                       'FROM qc_hourly WHERE hour_ms >= ? AND hour_ms <= ?')
+                args = [from_ms, to_ms]
+                if param:
+                    sql += ' AND parameter = ?'
+                    args.append(param)
+                sql += ' ORDER BY stream, parameter, hour_ms'
+
+            rows = db.execute(sql, args).fetchall()
+        except Exception:
+            traceback.print_exc()
+            self.send_error(500, 'Query failed')
+            return
+        finally:
+            db.close()
+
+        streams = {}
+        for stream, p, bin_val, avg in rows:
+            if stream not in streams:
+                streams[stream] = {}
+            if p not in streams[stream]:
+                streams[stream][p] = []
+            streams[stream][p].append([bin_val, round(avg, 4)])
+
+        payload = json.dumps({
+            'generated': int(time.time() * 1000),
+            'from':      from_ms,
+            'to':        to_ms,
+            'bin_ms':    bin_ms,
+            'streams':   streams,
+        }, separators=(',', ':')).encode()
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass  # suppress per-request stdout noise
+
+
+def _start_api(db_path, port):
+    _APIHandler.db_path = db_path
+    srv = HTTPServer(('127.0.0.1', port), _APIHandler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    print(f'[qclog2] API listening on 127.0.0.1:{port}/api/qc', flush=True)
+
+
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
 def _rollup_hourly(db, raw_retention_h):
@@ -302,6 +416,7 @@ class QCBackend(client.Application):
         self._output_dir    = cfg.get('output_dir',    str(Path(__file__).parent))
         self._json_interval = cfg.get('json_interval', 60)
         self._raw_ret_h     = cfg.get('raw_retention_h', 25)
+        self._api_port      = cfg.get('api_port', 8765)
 
         self._db            = None
         self._insert_buf    = []       # batch inserts
@@ -317,6 +432,7 @@ class QCBackend(client.Application):
             self._db = _open_db(self._db_path)
             print(f'[qclog2] DB: {self._db_path}', flush=True)
             print(f'[qclog2] Output: {self._output_dir}', flush=True)
+            _start_api(self._db_path, self._api_port)
             return client.Application.run(self)
         except Exception:
             traceback.print_exc()

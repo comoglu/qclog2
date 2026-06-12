@@ -128,12 +128,7 @@
                 </select>
               </label>
               <div class="hist-label">Time range
-                <div class="time-range-btns">
-                  <button class="tr-btn" data-range="1h">1h</button>
-                  <button class="tr-btn" data-range="6h">6h</button>
-                  <button class="tr-btn active" data-range="24h">24h</button>
-                  <button class="tr-btn" data-range="7d">7d</button>
-                </div>
+                <div id="tpick-history"></div>
               </div>
               <button id="hist-load-btn" class="btn-primary">Load</button>
             </div>
@@ -167,14 +162,9 @@
                     <option value="spikes_count">Spikes</option>
                   </select>
                 </label>
-                <label class="hist-label">Time range
-                  <div class="time-range-btns">
-                    <button class="tr-btn" data-range="1h">1h</button>
-                    <button class="tr-btn" data-range="6h">6h</button>
-                    <button class="tr-btn active" data-range="24h">24h</button>
-                    <button class="tr-btn" data-range="7d">7d</button>
-                  </div>
-                </label>
+                <div class="hist-label">Time range
+                  <div id="tpick-overlay"></div>
+                </div>
               </div>
               <div class="overlay-ctrl-row overlay-actions">
                 <input id="cmp-search" type="search" placeholder="Filter streams…" autocomplete="off">
@@ -218,12 +208,9 @@
                 <option value="spikes_count">Spikes</option>
               </select>
             </label>
-            <label class="hist-label">Time range
-              <div class="time-range-btns">
-                <button class="tr-btn active" data-range="24h">24h</button>
-                <button class="tr-btn" data-range="7d">7d</button>
-              </div>
-            </label>
+            <div class="hist-label">Time range
+              <div id="tpick-heatmap"></div>
+            </div>
             <button id="hm-load-btn" class="btn-primary">Load</button>
           </div>
         </div>
@@ -268,12 +255,7 @@
           <span id="chart-param-label" class="param-badge"></span>
         </div>
         <div class="panel-hdr-right">
-          <div class="time-range-btns">
-            <button class="tr-btn" data-range="1h">1h</button>
-            <button class="tr-btn" data-range="6h">6h</button>
-            <button class="tr-btn active" data-range="24h">24h</button>
-            <button class="tr-btn" data-range="7d">7d</button>
-          </div>
+          <div id="tpick-panel"></div>
           <button id="panel-close">✕</button>
         </div>
       </div>
@@ -304,6 +286,9 @@
           <div class="conn-grid">
             <label class="conn-label">QC JSON URL
               <input type="text" id="cfg-url" placeholder="qc_current.json">
+            </label>
+            <label class="conn-label">API URL (on-demand time-range queries)
+              <input type="text" id="cfg-api" placeholder="/api/qc">
             </label>
             <label class="conn-label">FDSNWS base URL (for station coordinates &amp; names)
               <input type="text" id="cfg-fdsnws" placeholder="http://localhost:8081/fdsnws">

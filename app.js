@@ -15,9 +15,23 @@ const PARAMS = {
   spikes_count:   { label: 'Spikes', unit: '',   fmt: v => v == null ? '—' : v.toFixed(0),        lowerWorse: false },
 };
 
+const PRESETS = [
+  { label: 'Last 1 h',   ms: 3_600_000 },
+  { label: 'Last 3 h',   ms: 3 * 3_600_000 },
+  { label: 'Last 6 h',   ms: 6 * 3_600_000 },
+  { label: 'Last 12 h',  ms: 12 * 3_600_000 },
+  { label: 'Last 24 h',  ms: 24 * 3_600_000 },
+  { label: 'Last 2 d',   ms: 2 * 86_400_000 },
+  { label: 'Last 7 d',   ms: 7 * 86_400_000 },
+  { label: 'Last 14 d',  ms: 14 * 86_400_000 },
+  { label: 'Last 30 d',  ms: 30 * 86_400_000 },
+  { label: 'Custom…',    ms: null },
+];
+
 const DEFAULTS = {
   dataUrl:   'qc_current.json',
   histUrl:   'qc_24h.json',
+  apiUrl:    '/api/qc',
   fdsnws:    '',
   refreshMs: 60_000,
   theme:     'light',
@@ -45,6 +59,7 @@ const S = {
   prefs: {
     dataUrl:    DEFAULTS.dataUrl,
     histUrl:    DEFAULTS.histUrl,
+    apiUrl:     DEFAULTS.apiUrl,
     fdsnws:     DEFAULTS.fdsnws,
     refreshMs:  DEFAULTS.refreshMs,
     theme:      DEFAULTS.theme,
@@ -69,10 +84,8 @@ const S = {
 
   // Compare view
   cmpPlot:    null,
-  cmpRange:   '24h',
 
   // Heatmap view
-  hmRange:    '24h',
   hmCanvas:   null,
   hmStreams:  [],
   hmBins:     [],
@@ -114,6 +127,78 @@ const fmtXAxis = (u, vals) => vals.map(v => {
     return `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')}`;
   return `${HH}:${MM}`;
 });
+
+// ── Time picker ───────────────────────────────────────────────────────────────
+
+function utcInputVal(ms) {
+  return new Date(ms).toISOString().slice(0, 16);
+}
+
+function fmtRangeLabel(from_ms, to_ms) {
+  const span = to_ms - from_ms;
+  const preset = PRESETS.find(p => p.ms === span);
+  if (preset && preset.ms) return preset.label;
+  return `${utcInputVal(from_ms).replace('T',' ')} → ${utcInputVal(to_ms).replace('T',' ')} UTC`;
+}
+
+function timePickerHtml(defaultMs = 86_400_000) {
+  const opts = PRESETS.map(p =>
+    `<option value="${p.ms ?? 'custom'}"${p.ms === defaultMs ? ' selected' : ''}>${p.label}</option>`
+  ).join('');
+  const now    = Date.now();
+  const fromStr = utcInputVal(now - defaultMs);
+  const toStr   = utcInputVal(now);
+  return `<div class="tpick">` +
+    `<select class="tpick-sel">${opts}</select>` +
+    `<span class="tpick-abs" style="display:none">` +
+      `<input class="tpick-from" type="datetime-local" step="60" value="${fromStr}" title="Start (UTC)">` +
+      `<span class="tpick-arrow">→</span>` +
+      `<input class="tpick-to"   type="datetime-local" step="60" value="${toStr}"   title="End (UTC)">` +
+      `<span class="tpick-tz">UTC</span>` +
+      `<button class="tpick-apply btn-primary">Apply</button>` +
+    `</span>` +
+  `</div>`;
+}
+
+function pickerRange(pickerEl) {
+  const sel = pickerEl.querySelector('.tpick-sel');
+  if (sel.value !== 'custom') {
+    const to   = Date.now();
+    const from = to - Number(sel.value);
+    return { from, to };
+  }
+  const from = new Date(pickerEl.querySelector('.tpick-from').value + ':00Z').getTime();
+  const to   = new Date(pickerEl.querySelector('.tpick-to').value   + ':00Z').getTime();
+  return { from, to };
+}
+
+function initPicker(pickerEl, onApply) {
+  const sel = pickerEl.querySelector('.tpick-sel');
+  const abs = pickerEl.querySelector('.tpick-abs');
+  sel.addEventListener('change', () => {
+    const custom = sel.value === 'custom';
+    abs.style.display = custom ? '' : 'none';
+    if (custom) {
+      const now = Date.now();
+      pickerEl.querySelector('.tpick-from').value = utcInputVal(now - 86_400_000);
+      pickerEl.querySelector('.tpick-to').value   = utcInputVal(now);
+    } else {
+      onApply(pickerRange(pickerEl));
+    }
+  });
+  pickerEl.querySelector('.tpick-apply').addEventListener('click', () => {
+    const { from, to } = pickerRange(pickerEl);
+    if (!from || !to || to <= from) return;
+    onApply({ from, to });
+  });
+}
+
+async function fetchQCRange(from_ms, to_ms) {
+  const url = `${S.prefs.apiUrl}?from=${from_ms}&to=${to_ms}&_=${Date.now()}`;
+  const r   = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
 
 function cellStatus(param, value) {
   if (value == null) return 'nodata';
@@ -426,34 +511,25 @@ function closeChart() {
   if (S.uplot) { S.uplot.destroy(); S.uplot = null; }
 }
 
-function loadChartData() {
-  const range   = S.histRange;
-  const urlMap  = { '1h': 'qc_24h.json', '6h': 'qc_24h.json', '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
-  const jsonUrl = urlMap[range] ?? 'qc_24h.json';
+async function loadChartData() {
+  const picker = document.querySelector('#chart-panel .tpick');
+  if (!picker) return;
+  const { from, to } = pickerRange(picker);
 
   document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
-
-  fetch(jsonUrl + '?_=' + Date.now())
-    .then(r => r.json())
-    .then(data => {
-      S.histData = data;
-      drawChart();
-    })
-    .catch(() => {
-      document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Failed to load history.</div>';
-    });
+  try {
+    S.histData = await fetchQCRange(from, to);
+    drawChart();
+  } catch(_) {
+    document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Failed to load history.</div>';
+  }
 }
 
 function drawChart() {
   if (!S.detailStream || !S.detailParam || !S.histData) return;
 
-  const raw = S.histData.streams?.[S.detailStream]?.[S.detailParam] ?? [];
-  const range = S.histRange;
-  const nowMs = Date.now();
-  const rangeMs = { '1h': 3600_000, '6h': 6*3600_000, '24h': 24*3600_000, '7d': 7*24*3600_000 };
-  const cutoffMs = nowMs - (rangeMs[range] ?? 24*3600_000);
-
-  const filtered = raw.filter(([t]) => t >= cutoffMs);
+  const raw      = S.histData.streams?.[S.detailStream]?.[S.detailParam] ?? [];
+  const filtered = raw; // API already scopes to requested range
 
   const wrap = document.getElementById('chart-wrap');
   wrap.innerHTML = '';
@@ -742,19 +818,14 @@ async function loadHistoryChart() {
     wrap.innerHTML = '<div class="chart-loading">Select a stream first.</div>';
     return;
   }
-  const active  = document.querySelector('#view-history .tr-btn.active');
-  const range   = active?.dataset.range ?? '24h';
-  const urlMap  = { '1h': 'qc_24h.json', '6h': 'qc_24h.json', '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
-  const base    = S.prefs.dataUrl.replace(/[^/]*$/, '') || './';
-  const jsonUrl = base + (urlMap[range] ?? 'qc_24h.json');
+  const picker  = document.querySelector('#view-history .tpick');
+  const { from, to } = picker ? pickerRange(picker) : { from: Date.now() - 86_400_000, to: Date.now() };
   wrap.innerHTML = '<div class="chart-loading">Loading…</div>';
   document.getElementById('history-stats').innerHTML = '';
   document.getElementById('history-table-wrap').innerHTML = '';
   try {
-    const r = await fetch(jsonUrl + '?_=' + Date.now());
-    if (!r.ok) throw new Error(r.status);
-    const data = await r.json();
-    drawHistoryChart(data, stream, param, range);
+    const data = await fetchQCRange(from, to);
+    drawHistoryChart(data, stream, param, from, to);
   } catch(_) {
     wrap.innerHTML = '<div class="chart-loading">Failed to load history data.</div>';
   }
@@ -762,11 +833,9 @@ async function loadHistoryChart() {
 
 let _histPlot = null;
 
-function drawHistoryChart(histData, stream, param, range) {
+function drawHistoryChart(histData, stream, param, from_ms, to_ms) {
   const raw      = histData.streams?.[stream]?.[param] ?? [];
-  const rangeMs  = { '1h': 3600e3, '6h': 6*3600e3, '24h': 24*3600e3, '7d': 7*24*3600e3 };
-  const cutoff   = Date.now() - (rangeMs[range] ?? 24*3600e3);
-  const filtered = raw.filter(([t]) => t >= cutoff);
+  const filtered = raw; // API already scopes to requested range
   const wrap     = document.getElementById('history-chart-wrap');
   wrap.innerHTML = '';
 
@@ -853,7 +922,7 @@ function drawHistoryChart(histData, stream, param, range) {
         <span>min <strong>${pInfo.fmt(mn)}</strong></span>
         <span>avg <strong>${pInfo.fmt(avg)}</strong></span>
         <span>max <strong>${pInfo.fmt(mx)}</strong></span>
-        <span class="hist-pts">${nonNull.length} pts · ${range}</span>
+        <span class="hist-pts">${nonNull.length} pts · ${fmtRangeLabel(from_ms, to_ms)}</span>
       </div>`;
   }
 
@@ -904,6 +973,7 @@ function openSettings() {
   const getEl = id => document.getElementById(id);
   const thr = S.prefs.thresholds;
   getEl('cfg-url').value    = S.prefs.dataUrl;
+  getEl('cfg-api').value    = S.prefs.apiUrl;
   getEl('cfg-fdsnws').value = S.prefs.fdsnws;
   getEl('thr-avail-warn').value    = thr.availability?.warn    ?? '';
   getEl('thr-avail-alert').value   = thr.availability?.alert   ?? '';
@@ -934,6 +1004,7 @@ function applySettings() {
   const changed = newUrl !== S.prefs.dataUrl;
 
   S.prefs.dataUrl = newUrl;
+  S.prefs.apiUrl  = v('cfg-api')    || DEFAULTS.apiUrl;
   S.prefs.fdsnws  = v('cfg-fdsnws') || '';
   S.prefs.thresholds = {
     availability:   { warn: n('thr-avail-warn'),    alert: n('thr-avail-alert'),    lowerWorse: true  },
@@ -961,6 +1032,7 @@ function savePrefs() {
   try {
     localStorage.setItem('qclog2', JSON.stringify({
       dataUrl:       S.prefs.dataUrl,
+      apiUrl:        S.prefs.apiUrl,
       fdsnws:        S.prefs.fdsnws,
       refreshMs:     S.refreshMs,
       theme:         S.theme,
@@ -978,6 +1050,7 @@ function loadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem('qclog2') || '{}');
     if (p.dataUrl)    S.prefs.dataUrl    = p.dataUrl;
+    if (p.apiUrl)     S.prefs.apiUrl     = p.apiUrl;
     if (p.fdsnws)     S.prefs.fdsnws     = p.fdsnws;
     if (p.refreshMs)  S.refreshMs        = p.refreshMs;
     if (p.theme)      S.theme            = p.theme;
@@ -998,6 +1071,7 @@ async function loadDeploymentConfig() {
     const saved = JSON.parse(localStorage.getItem('qclog2') || '{}');
     if (!saved.dataUrl && cfg.qc_url)  S.prefs.dataUrl = cfg.qc_url;
     if (!saved.fdsnws  && cfg.fdsnws)  S.prefs.fdsnws  = cfg.fdsnws;
+    if (!saved.apiUrl  && cfg.api_url) S.prefs.apiUrl  = cfg.api_url;
   } catch(_) {}
 }
 
@@ -1116,19 +1190,16 @@ function initEvents() {
     }
   });
 
-  // Time range buttons — chart panel and history view handled separately
-  document.querySelectorAll('.tr-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const inHistory = !!btn.closest('#view-history');
-      btn.closest('.time-range-btns')?.querySelectorAll('.tr-btn')
-        .forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      if (!inHistory) {
-        S.histRange = btn.dataset.range;
-        if (S.detailStream) loadChartData();
-      }
-    });
-  });
+  // Time pickers — inject HTML then wire each one
+  document.getElementById('tpick-panel').innerHTML   = timePickerHtml(86_400_000);
+  document.getElementById('tpick-history').innerHTML = timePickerHtml(86_400_000);
+  document.getElementById('tpick-overlay').innerHTML = timePickerHtml(86_400_000);
+  document.getElementById('tpick-heatmap').innerHTML = timePickerHtml(86_400_000);
+
+  initPicker(document.querySelector('#chart-panel   .tpick'), () => { if (S.detailStream) loadChartData(); });
+  initPicker(document.querySelector('#view-history  .tpick'), () => { /* load triggered by Load btn */ });
+  initPicker(document.querySelector('#view-compare  .tpick'), () => { /* load triggered by Plot btn */ });
+  initPicker(document.querySelector('#view-heatmap  .tpick'), () => { /* load triggered by Load btn */ });
 
   // Watchlist-only toggle
   document.getElementById('watchlist-only-btn').addEventListener('click', () => {
@@ -1160,23 +1231,8 @@ function initEvents() {
   document.getElementById('cmp-top10-btn').addEventListener('click', () => selectTopN(10));
   document.getElementById('cmp-search').addEventListener('input', populateCompareStreams);
   document.getElementById('cmp-param').addEventListener('change', populateCompareStreams);
-  document.querySelectorAll('#view-compare .tr-btn').forEach(btn =>
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#view-compare .tr-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      S.cmpRange = btn.dataset.range;
-    })
-  );
-
   // Heatmap view
   document.getElementById('hm-load-btn').addEventListener('click', loadHeatmap);
-  document.querySelectorAll('#view-heatmap .tr-btn').forEach(btn =>
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#view-heatmap .tr-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      S.hmRange = btn.dataset.range;
-    })
-  );
 
   // Events view
   document.getElementById('events-clear-btn').addEventListener('click', () => {
@@ -1436,20 +1492,16 @@ async function loadCompareChart() {
     return;
   }
   const param   = document.getElementById('cmp-param').value;
-  const range   = S.cmpRange;
-  const urlMap  = { '1h': 'qc_24h.json', '6h': 'qc_24h.json', '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
-  const base    = S.prefs.dataUrl.replace(/[^/]*$/, '') || './';
-  const jsonUrl = base + (urlMap[range] ?? 'qc_24h.json');
+  const picker  = document.querySelector('#view-compare .tpick');
+  const { from, to } = picker ? pickerRange(picker) : { from: Date.now() - 86_400_000, to: Date.now() };
 
   document.getElementById('cmp-chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
   document.getElementById('cmp-legend').innerHTML = '';
   document.getElementById('cmp-stats').innerHTML = '';
 
   try {
-    const r = await fetch(jsonUrl + '?_=' + Date.now());
-    if (!r.ok) throw new Error(r.status);
-    const data = await r.json();
-    drawCompareChart(data, streams, param, range);
+    const data = await fetchQCRange(from, to);
+    drawCompareChart(data, streams, param, from, to);
   } catch(_) {
     document.getElementById('cmp-chart-wrap').innerHTML =
       '<div class="chart-loading">Failed to load data.</div>';
@@ -1463,16 +1515,13 @@ function posTooltip(tooltip, cx, cy) {
   tooltip.style.top  = (cy - th / 2 < 4 ? 4 : cy + th / 2 > window.innerHeight - 4 ? window.innerHeight - th - 4 : cy - th / 2) + 'px';
 }
 
-function drawCompareChart(histData, streams, param, range) {
-  const rangeMs = { '1h': 3600e3, '6h': 6*3600e3, '24h': 24*3600e3, '7d': 7*24*3600e3 };
-  const cutoff  = Date.now() - (rangeMs[range] ?? 24*3600e3);
-  const pInfo   = PARAMS[param] ?? { label: param, unit: '', fmt: v => v == null ? '—' : String(v) };
+function drawCompareChart(histData, streams, param, from_ms, to_ms) {
+  const pInfo = PARAMS[param] ?? { label: param, unit: '', fmt: v => v == null ? '—' : String(v) };
 
-  // Collect all timestamps (bins are aligned across streams)
+  // Collect all timestamps (bins are aligned across streams; API already scopes the range)
   const tsSet = new Set();
   streams.forEach(s =>
     (histData.streams?.[s]?.[param] ?? [])
-      .filter(([t]) => t >= cutoff)
       .forEach(([t]) => tsSet.add(t))
   );
   if (!tsSet.size) {
@@ -1486,7 +1535,6 @@ function drawCompareChart(histData, streams, param, range) {
   const seriesData = streams.map(s => {
     const arr = new Array(xs.length).fill(null);
     (histData.streams?.[s]?.[param] ?? [])
-      .filter(([t]) => t >= cutoff)
       .forEach(([t, v]) => { const i = tsIdx.get(t); if (i !== undefined) arr[i] = v; });
     return arr;
   });
@@ -1572,26 +1620,22 @@ function drawCompareChart(histData, streams, param, range) {
 // ══════════════════════════════════════════════════════════
 async function loadHeatmap() {
   const param  = document.getElementById('hm-param').value;
-  const range  = S.hmRange;
-  const urlMap = { '24h': 'qc_24h.json', '7d': 'qc_7d.json' };
-  const base   = S.prefs.dataUrl.replace(/[^/]*$/, '') || './';
-  const jsonUrl = base + (urlMap[range] ?? 'qc_24h.json');
+  const picker = document.querySelector('#view-heatmap .tpick');
+  const { from, to } = picker ? pickerRange(picker) : { from: Date.now() - 86_400_000, to: Date.now() };
 
   document.getElementById('heatmap-labels').innerHTML = '<div class="hm-label" style="color:var(--text3)">Loading…</div>';
   document.getElementById('heatmap-canvas-wrap').innerHTML = '';
 
   try {
-    const r = await fetch(jsonUrl + '?_=' + Date.now());
-    if (!r.ok) throw new Error(r.status);
-    const data = await r.json();
-    renderHeatmap(data, param, range);
+    const data = await fetchQCRange(from, to);
+    renderHeatmap(data, param, from, to, data.bin_ms ?? 600_000);
   } catch(_) {
     document.getElementById('heatmap-labels').innerHTML =
       '<div class="hm-label" style="color:var(--s-alert)">Failed to load.</div>';
   }
 }
 
-function renderHeatmap(histData, param, range) {
+function renderHeatmap(histData, param, from_ms, to_ms, bin_ms) {
   const streams = Object.keys(histData.streams || {}).sort();
   if (!streams.length) {
     document.getElementById('heatmap-labels').innerHTML =
@@ -1599,17 +1643,13 @@ function renderHeatmap(histData, param, range) {
     return;
   }
 
-  const binMs   = range === '7d' ? 3600e3 : 10 * 60e3;
-  const rangeMs = range === '7d' ? 7 * 24 * 3600e3 : 24 * 3600e3;
-  const now     = Date.now();
-  const cutoff  = now - rangeMs;
-
-  // Build ordered bin list
-  const firstBin = Math.ceil(cutoff / binMs) * binMs;
+  // Build ordered bin list from the exact requested range
+  const firstBin = Math.ceil(from_ms / bin_ms) * bin_ms;
   const bins = [];
-  for (let t = firstBin; t <= now; t += binMs) bins.push(t);
+  for (let t = firstBin; t <= to_ms; t += bin_ms) bins.push(t);
 
-  const CELL_W  = range === '7d' ? 6 : 5;
+  const isLong  = (to_ms - from_ms) >= 48 * 3600e3;
+  const CELL_W  = isLong ? 6 : 5;
   const CELL_H  = 20;
   const LABEL_W = 160;
   const canvasW = bins.length * CELL_W;
@@ -1638,7 +1678,7 @@ function renderHeatmap(histData, param, range) {
     if (i % labelEvery !== 0) return;
     const lbl = document.createElement('span');
     const d = new Date(t);
-    lbl.textContent = range === '7d'
+    lbl.textContent = isLong
       ? `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')} ${String(d.getUTCHours()).padStart(2,'0')}h`
       : `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
     lbl.style.cssText = `position:absolute;left:${i * CELL_W}px;font-size:9px;color:var(--text3);white-space:nowrap;`;
@@ -1658,7 +1698,7 @@ function renderHeatmap(histData, param, range) {
   // Draw cells
   streams.forEach((stream, si) => {
     const raw     = histData.streams?.[stream]?.[param] ?? [];
-    const lookup  = new Map(raw.map(([t, v]) => [Math.round(t / binMs) * binMs, v]));
+    const lookup  = new Map(raw.map(([t, v]) => [Math.round(t / bin_ms) * bin_ms, v]));
     bins.forEach((bin, bi) => {
       const v  = lookup.get(bin) ?? null;
       const st = cellStatus(param, v);
@@ -1703,7 +1743,7 @@ function renderHeatmap(histData, param, range) {
     }
     const stream = streams[si];
     const raw    = histData.streams?.[stream]?.[param] ?? [];
-    const lookup = new Map(raw.map(([t,v]) => [Math.round(t / binMs) * binMs, v]));
+    const lookup = new Map(raw.map(([t,v]) => [Math.round(t / bin_ms) * bin_ms, v]));
     const v      = lookup.get(bins[bi]) ?? null;
     const pInfo  = PARAMS[param] ?? { fmt: v => v == null ? '—' : String(v) };
     const d      = new Date(bins[bi]);
