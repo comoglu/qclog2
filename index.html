@@ -143,52 +143,30 @@
 
       <!-- OVERLAY VIEW -->
       <section id="view-compare" class="view">
-        <div id="overlay-layout">
-
-          <!-- Left panel: stream selector -->
-          <div id="overlay-sidebar">
-            <div id="overlay-sidebar-top">
-              <div class="overlay-ctrl-row">
-                <label class="hist-label">Parameter
-                  <select id="cmp-param">
-                    <option value="availability">Availability</option>
-                    <option value="delay">Delay</option>
-                    <option value="latency">Latency</option>
-                    <option value="timing_quality">Timing Quality</option>
-                    <option value="rms">RMS</option>
-                    <option value="offset">Offset</option>
-                    <option value="gaps_count">Gaps</option>
-                    <option value="overlaps_count">Overlaps</option>
-                    <option value="spikes_count">Spikes</option>
-                  </select>
-                </label>
-                <div class="hist-label">Time range
-                  <div id="tpick-overlay"></div>
-                </div>
-              </div>
-              <div class="overlay-ctrl-row overlay-actions">
-                <input id="cmp-search" type="search" placeholder="Filter streams…" autocomplete="off">
-                <span id="cmp-stream-count" class="cmp-count"></span>
-              </div>
-              <div class="overlay-ctrl-row overlay-actions">
-                <button id="cmp-all-btn">All</button>
-                <button id="cmp-none-btn">None</button>
-                <button id="cmp-watched-btn">Watchlist</button>
-                <button id="cmp-top10-btn" title="Select 10 streams with worst current status">Top 10 worst</button>
-                <button id="cmp-load-btn" class="btn-primary">Plot</button>
-              </div>
-            </div>
-            <div id="cmp-stream-list"></div>
+        <div id="overlay-controls">
+          <label class="hist-label">Parameter
+            <select id="cmp-param">
+              <option value="availability">Availability</option>
+              <option value="delay">Delay</option>
+              <option value="latency">Latency</option>
+              <option value="timing_quality">Timing Quality</option>
+              <option value="rms">RMS</option>
+              <option value="offset">Offset</option>
+              <option value="gaps_count">Gaps</option>
+              <option value="overlaps_count">Overlaps</option>
+              <option value="spikes_count">Spikes</option>
+            </select>
+          </label>
+          <div class="hist-label">Time range
+            <div id="tpick-overlay"></div>
           </div>
-
-          <!-- Right panel: chart -->
-          <div id="overlay-chart-panel">
-            <div id="cmp-chart-wrap"></div>
-            <div id="cmp-stats"></div>
-            <div id="cmp-legend"></div>
+          <div class="overlay-search-wrap">
+            <input id="cmp-search" type="search" placeholder="Filter streams (e.g. AU.ARMA or BHZ)…" autocomplete="off">
+            <span id="cmp-stream-count" class="cmp-count"></span>
           </div>
-
         </div>
+        <div id="overlay-chart-wrap"></div>
+        <div id="cmp-stats"></div>
       </section>
 
       <!-- HEATMAP VIEW -->
@@ -349,6 +327,7 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/leaflet.markercluster.js"></script>
 <script src="vendor/uplot.min.js"></script>
+<script src="vendor/plotly.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -82,9 +82,6 @@ const S = {
   uplot:      null,
   visibleParams: [],   // params actually seen in data
 
-  // Compare view
-  cmpPlot:    null,
-
   // Heatmap view
   hmCanvas:   null,
   hmStreams:  [],
@@ -317,7 +314,6 @@ function render() {
   renderStatusBar();
   renderNetFilter();
   populateHistStream();
-  populateCompareStreams();
   if (S.view === 'table') renderTable();
   if (S.view === 'grid')  renderGrid();
   if (S.view === 'map' && _map) refreshMapMarkers();
@@ -341,9 +337,10 @@ function switchView(v) {
   if (v === 'map' || v === 'history' || v === 'compare' || v === 'heatmap' || v === 'events') closeChart();
   if (v !== 'history' && _histPlot) { _histPlot.destroy(); _histPlot = null; }
   if (v === 'map')             { initMap(); if (S.data) refreshMapMarkers(); }
-  if (v === 'grid'  && S.data) renderGrid();
-  if (v === 'table' && S.data) renderTable();
-  if (v === 'events') renderEvents();
+  if (v === 'grid'    && S.data) renderGrid();
+  if (v === 'table'   && S.data) renderTable();
+  if (v === 'compare') loadOverlay();
+  if (v === 'events')  renderEvents();
 }
 
 // ── Status bar ──────────────────────────────────────────────
@@ -1190,6 +1187,7 @@ function initEvents() {
     document.body.classList.toggle('dark', S.theme === 'dark');
     savePrefs();
     if (S.uplot && S.detailStream) drawChart();
+    if (S.view === 'compare' && _overlayTraces.length) loadOverlay();
   });
   document.getElementById('panel-close').addEventListener('click', closeChart);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeChart(); });
@@ -1226,7 +1224,7 @@ function initEvents() {
 
   initPicker(document.querySelector('#chart-panel   .tpick'), () => { if (S.detailStream) loadChartData(); });
   initPicker(document.querySelector('#view-history  .tpick'), () => { /* load triggered by Load btn */ });
-  initPicker(document.querySelector('#view-compare  .tpick'), () => { /* load triggered by Plot btn */ });
+  initPicker(document.querySelector('#view-compare  .tpick'), () => { if (S.view === 'compare') loadOverlay(); });
   initPicker(document.querySelector('#view-heatmap  .tpick'), () => { /* load triggered by Load btn */ });
 
   // Watchlist-only toggle
@@ -1241,24 +1239,9 @@ function initEvents() {
   // Notification toggle
   document.getElementById('notif-toggle').addEventListener('click', toggleNotifications);
 
-  // Overlay view
-  document.getElementById('cmp-load-btn').addEventListener('click', loadCompareChart);
-  document.getElementById('cmp-all-btn').addEventListener('click', () => setCmpSelection(true));
-  document.getElementById('cmp-none-btn').addEventListener('click', () => setCmpSelection(false));
-  document.getElementById('cmp-watched-btn').addEventListener('click', () => {
-    document.querySelectorAll('.cmp-cb').forEach(cb => {
-      cb.checked = S.watchlist.has(cb.value);
-      cb.closest('.cmp-cb-label').classList.toggle('checked', cb.checked);
-    });
-    document.querySelectorAll('.cmp-net-cb').forEach(ncb => {
-      const group = ncb.closest('.cmp-net-group');
-      const cbs = [...group.querySelectorAll('.cmp-cb')];
-      ncb.checked = cbs.length > 0 && cbs.every(c => c.checked);
-    });
-  });
-  document.getElementById('cmp-top10-btn').addEventListener('click', () => selectTopN(10));
-  document.getElementById('cmp-search').addEventListener('input', populateCompareStreams);
-  document.getElementById('cmp-param').addEventListener('change', populateCompareStreams);
+  // Overlay view — auto-loads on param change; search filters without reload
+  document.getElementById('cmp-param').addEventListener('change', () => { if (S.view === 'compare') loadOverlay(); });
+  document.getElementById('cmp-search').addEventListener('input', e => filterOverlay(e.target.value));
   // Heatmap view
   document.getElementById('hm-load-btn').addEventListener('click', loadHeatmap);
 
@@ -1400,247 +1383,119 @@ function maybeNotify(stream, from, to) {
 }
 
 // ══════════════════════════════════════════════════════════
-// OVERLAY VIEW  (multi-stream overlay chart)
+// OVERLAY VIEW  (Plotly multi-stream chart, color by network)
 // ══════════════════════════════════════════════════════════
-function populateCompareStreams() {
-  const list = document.getElementById('cmp-stream-list');
-  if (!list || !S.data) return;
 
-  const param   = document.getElementById('cmp-param').value;
-  const checked = new Set(
-    [...document.querySelectorAll('.cmp-cb:checked')].map(cb => cb.value)
-  );
-  const filterQ = (document.getElementById('cmp-search')?.value ?? '').toLowerCase();
+const NET_COLORS = {
+  AU: '#1f77b4', '2O': '#ff7f0e', M8: '#2ca02c',
+  YW: '#d62728', '3B': '#9467bd', IU: '#8c564b',
+  II: '#e377c2', GE: '#17becf', G:  '#bcbd22',
+};
+const NET_COLOR_FALLBACK = '#7f7f7f';
 
-  // Group streams by network, attach current value for display
-  const nets = {};
-  for (const [sid, sdata] of Object.entries(S.data.streams || {})) {
-    const parts = sid.split('.');
-    const net = parts[0];
-    if (filterQ && !sid.toLowerCase().includes(filterQ)) continue;
-    if (!nets[net]) nets[net] = [];
-    const entry = sdata[param];
-    nets[net].push({ sid, value: entry?.v ?? null, status: cellStatus(param, entry?.v ?? null) });
-  }
-
-  const totalVisible = Object.values(nets).reduce((s, a) => s + a.length, 0);
-  document.getElementById('cmp-stream-count').textContent =
-    `${totalVisible} stream${totalVisible !== 1 ? 's' : ''}`;
-
-  list.innerHTML = Object.entries(nets).sort().map(([net, items]) => {
-    const allChecked = items.every(({sid}) => checked.has(sid));
-    const rows = items.map(({sid, value, status}) => {
-      const isChecked = checked.has(sid);
-      const parts = sid.split('.');
-      const label = `${parts[1] ?? sid}${parts[2] ? '.'+parts[2] : ''} <span class="cmp-loc">${esc(parts[3] ?? '')}</span>`;
-      const valStr = value == null ? '<span class="cmp-nodata">—</span>'
-        : `<span class="cmp-val cmp-val-${status}">${(PARAMS[param]?.fmt ?? (v=>v))(value)}</span>`;
-      return `<label class="cmp-cb-label${isChecked ? ' checked' : ''}">
-        <input type="checkbox" class="cmp-cb" value="${esc(sid)}"${isChecked ? ' checked' : ''}>
-        <span class="cmp-stream-name">${label}</span>${valStr}
-      </label>`;
-    }).join('');
-    return `<div class="cmp-net-group">
-      <div class="cmp-net-hdr">
-        <label class="cmp-net-cb-wrap" title="Select all ${esc(net)}">
-          <input type="checkbox" class="cmp-net-cb" data-net="${esc(net)}"${allChecked ? ' checked' : ''}>
-          <strong>${esc(net)}</strong>
-        </label>
-        <span class="cmp-net-count">${items.length}</span>
-      </div>
-      <div class="cmp-net-streams">${rows}</div>
-    </div>`;
-  }).join('');
-
-  // wire stream checkboxes
-  list.querySelectorAll('.cmp-cb').forEach(cb =>
-    cb.addEventListener('change', () => {
-      cb.closest('.cmp-cb-label').classList.toggle('checked', cb.checked);
-      _updateNetGroupHeader(cb.closest('.cmp-net-group'));
-    })
-  );
-  // wire network header checkboxes
-  list.querySelectorAll('.cmp-net-cb').forEach(ncb =>
-    ncb.addEventListener('change', () => {
-      const group = ncb.closest('.cmp-net-group');
-      group.querySelectorAll('.cmp-cb').forEach(cb => {
-        cb.checked = ncb.checked;
-        cb.closest('.cmp-cb-label').classList.toggle('checked', ncb.checked);
-      });
-    })
-  );
+function netColor(stream) {
+  return NET_COLORS[stream.split('.')[0]] ?? NET_COLOR_FALLBACK;
 }
 
-function _updateNetGroupHeader(group) {
-  if (!group) return;
-  const cbs = [...group.querySelectorAll('.cmp-cb')];
-  const ncb = group.querySelector('.cmp-net-cb');
-  if (ncb) ncb.checked = cbs.length > 0 && cbs.every(c => c.checked);
-}
+let _overlayTraces = [];  // [{ name, color }] — kept for filterOverlay
 
-function setCmpSelection(state) {
-  document.querySelectorAll('.cmp-cb').forEach(cb => {
-    cb.checked = state;
-    cb.closest('.cmp-cb-label').classList.toggle('checked', state);
-  });
-  document.querySelectorAll('.cmp-net-cb').forEach(ncb => { ncb.checked = state; });
-}
+async function loadOverlay() {
+  const param  = document.getElementById('cmp-param')?.value;
+  const picker = document.querySelector('#view-compare .tpick');
+  if (!param || !picker) return;
 
-function selectTopN(n) {
-  const param = document.getElementById('cmp-param').value;
-  const thr   = S.prefs.thresholds[param];
-  // Score each stream: alert=3, warn=2, nodata=1, ok=0
-  const statusScore = { alert: 3, warn: 2, nodata: 1, ok: 0 };
-  const streams = Object.entries(S.data?.streams || {})
-    .map(([sid, sdata]) => {
-      const v  = sdata[param]?.v ?? null;
-      const st = cellStatus(param, v);
-      return { sid, score: statusScore[st] ?? 0 };
-    })
-    .sort((a, b) => b.score - a.score || a.sid.localeCompare(b.sid));
-
-  const top = new Set(streams.slice(0, n).map(s => s.sid));
-  document.querySelectorAll('.cmp-cb').forEach(cb => {
-    cb.checked = top.has(cb.value);
-    cb.closest('.cmp-cb-label').classList.toggle('checked', cb.checked);
-    _updateNetGroupHeader(cb.closest('.cmp-net-group'));
-  });
-  document.querySelectorAll('.cmp-net-cb').forEach(ncb => {
-    const group = ncb.closest('.cmp-net-group');
-    const cbs = [...group.querySelectorAll('.cmp-cb')];
-    ncb.checked = cbs.length > 0 && cbs.every(c => c.checked);
-  });
-}
-
-async function loadCompareChart() {
-  const streams = [...document.querySelectorAll('.cmp-cb:checked')].map(cb => cb.value);
-  if (!streams.length) {
-    document.getElementById('cmp-chart-wrap').innerHTML =
-      '<div class="chart-loading">Select at least one stream.</div>';
-    return;
-  }
-  const param   = document.getElementById('cmp-param').value;
-  const picker  = document.querySelector('#view-compare .tpick');
-  if (!picker) return;
-  document.getElementById('cmp-chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
-  document.getElementById('cmp-legend').innerHTML = '';
-  document.getElementById('cmp-stats').innerHTML = '';
+  const wrap = document.getElementById('overlay-chart-wrap');
+  Plotly.purge(wrap);
+  wrap.innerHTML = '<div class="chart-loading">Loading…</div>';
+  document.getElementById('cmp-stats').textContent = '';
+  document.getElementById('cmp-stream-count').textContent = '';
+  _overlayTraces = [];
 
   try {
     const data = await fetchRange(picker, param);
-    drawCompareChart(data, streams, param, data.from, data.to);
+    wrap.innerHTML = '';
+    drawOverlayChart(data, param, data.from, data.to);
   } catch(_) {
-    document.getElementById('cmp-chart-wrap').innerHTML =
-      '<div class="chart-loading">Failed to load data.</div>';
+    wrap.innerHTML = '<div class="chart-loading">Failed to load data.</div>';
   }
 }
 
-function posTooltip(tooltip, cx, cy) {
-  const tw = tooltip.offsetWidth  || 220;
-  const th = tooltip.offsetHeight || 80;
-  tooltip.style.left = (cx + 14 + tw > window.innerWidth  ? cx - tw - 10 : cx + 14) + 'px';
-  tooltip.style.top  = (cy - th / 2 < 4 ? 4 : cy + th / 2 > window.innerHeight - 4 ? window.innerHeight - th - 4 : cy - th / 2) + 'px';
-}
+function drawOverlayChart(histData, param, from_ms, to_ms) {
+  const pInfo  = PARAMS[param] ?? { label: param, unit: '', fmt: v => String(v) };
+  const isDark = document.body.classList.contains('dark');
+  const wrap   = document.getElementById('overlay-chart-wrap');
 
-function drawCompareChart(histData, streams, param, from_ms, to_ms) {
-  const pInfo = PARAMS[param] ?? { label: param, unit: '', fmt: v => v == null ? '—' : String(v) };
-
-  // Collect all timestamps (bins are aligned across streams; API already scopes the range)
-  const tsSet = new Set();
-  streams.forEach(s =>
-    (histData.streams?.[s]?.[param] ?? [])
-      .forEach(([t]) => tsSet.add(t))
-  );
-  if (!tsSet.size) {
-    document.getElementById('cmp-chart-wrap').innerHTML =
-      '<div class="chart-loading">No data for selected streams / time range.</div>';
+  const streams = Object.keys(histData.streams || {}).sort();
+  if (!streams.length) {
+    wrap.innerHTML = '<div class="chart-loading">No data for this parameter / time range.</div>';
     return;
   }
-  const xs = [...tsSet].sort((a, b) => a - b).map(t => t / 1000);
-  const tsIdx = new Map(xs.map((t, i) => [Math.round(t * 1000), i]));
 
-  const seriesData = streams.map(s => {
-    const arr = new Array(xs.length).fill(null);
-    (histData.streams?.[s]?.[param] ?? [])
-      .forEach(([t, v]) => { const i = tsIdx.get(t); if (i !== undefined) arr[i] = v; });
-    return arr;
+  // Threshold shapes
+  const thr    = S.prefs.thresholds[param];
+  const shapes = [];
+  if (thr?.warn  != null) shapes.push({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: thr.warn,  y1: thr.warn,  line: { color: '#ca8a04', width: 1, dash: 'dash' } });
+  if (thr?.alert != null) shapes.push({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: thr.alert, y1: thr.alert, line: { color: '#dc2626', width: 1, dash: 'dot'  } });
+
+  const traces = streams.map(s => {
+    const pts   = histData.streams[s]?.[param] ?? [];
+    const color = netColor(s);
+    return {
+      name: s,
+      x:    pts.map(([t]) => new Date(t)),
+      y:    pts.map(([,v]) => v),
+      type: 'scatter',
+      mode: 'lines',
+      line: { color, width: 1 },
+      hovertemplate: `<b>${s}</b><br>%{x|%Y-%m-%d %H:%M} UTC<br>${pInfo.label}: %{y:.3f} ${pInfo.unit}<extra></extra>`,
+    };
   });
 
-  const palette = streams.map((_, i) =>
-    `hsl(${Math.round(i * 360 / streams.length)},65%,${document.body.classList.contains('dark') ? '60%' : '45%'})`
-  );
+  _overlayTraces = traces.map(t => ({ name: t.name, color: t.line.color }));
 
-  const isDark  = document.body.classList.contains('dark');
-  const textCol = isDark ? '#94a3b8' : '#475569';
-  const gridCol = isDark ? '#1e293b' : '#e2e8f0';
-  const wrap    = document.getElementById('cmp-chart-wrap');
-  wrap.innerHTML = '';
-
-  const opts = {
-    width:  wrap.clientWidth || 700,
-    height: 280,
-    cursor: { show: true },
-    legend: { show: false },
-    series: [
-      {},
-      ...streams.map((s, i) => ({
-        label:  s,
-        stroke: palette[i],
-        width:  1.5,
-        spanGaps: false,
-        value: (u, v) => v == null ? '—' : pInfo.fmt(v),
-      })),
-    ],
-    axes: [
-      { stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol }, values: fmtXAxis },
-      { label: pInfo.unit, stroke: textCol, grid: { stroke: gridCol }, ticks: { stroke: gridCol },
-        values: (u, vals) => vals.map(v => v == null ? '' : pInfo.fmt(v)) },
-    ],
-    scales: { x: { time: true } },
-    padding: [10, 12, 0, 10],
+  const gridCol = isDark ? '#334155' : '#e2e8f0';
+  const layout  = {
+    margin: { t: 16, r: 24, b: 48, l: 60 },
+    paper_bgcolor: isDark ? '#1e293b' : '#ffffff',
+    plot_bgcolor:  isDark ? '#1e293b' : '#ffffff',
+    font:   { color: isDark ? '#94a3b8' : '#475569', size: 11 },
+    xaxis:  { type: 'date', gridcolor: gridCol, linecolor: gridCol, zeroline: false },
+    yaxis:  { title: { text: pInfo.unit, standoff: 8 }, gridcolor: gridCol, linecolor: gridCol, zeroline: false },
+    showlegend: false,
+    hovermode:  'closest',
+    shapes,
+    height: Math.max(340, window.innerHeight - 240),
+  };
+  const config = {
+    responsive:    true,
+    displaylogo:   false,
+    modeBarButtonsToRemove: ['select2d', 'lasso2d', 'autoScale2d'],
   };
 
-  // Hover tooltip
-  opts.hooks = { setCursor: [u => {
-    const tt = document.getElementById('chart-tooltip');
-    const { idx } = u.cursor;
-    if (idx == null || u.cursor.left < 0) { tt.style.display = 'none'; return; }
-    const rect = u.over.getBoundingClientRect();
-    const cx = rect.left + u.cursor.left, cy = rect.top + u.cursor.top;
-    const ts = new Date(xs[idx] * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-    const rows = streams
-      .map((s, i) => ({ s, v: seriesData[i][idx], col: palette[i] }))
-      .filter(x => x.v != null);
-    tt.innerHTML = `<div class="ct-time">${ts}</div>` +
-      (rows.length ? rows.slice(0, 14).map(({s, v, col}) =>
-        `<div class="ct-row"><span class="ct-dot" style="background:${col}"></span>` +
-        `<span class="ct-lbl">${esc(s)}</span>` +
-        `<span class="ct-val">${pInfo.fmt(v)}</span></div>`
-      ).join('') : '<div class="ct-time">No data at cursor</div>') +
-      (rows.length > 14 ? `<div class="ct-more">+${rows.length - 14} more</div>` : '');
-    tt.style.display = 'block';
-    posTooltip(tt, cx, cy);
-  }]};
+  Plotly.newPlot(wrap, traces, layout, config);
 
-  if (S.cmpPlot) { S.cmpPlot.destroy(); S.cmpPlot = null; }
-  S.cmpPlot = new uPlot(opts, [xs, ...seriesData], wrap);
-  S.cmpPlot.over.addEventListener('mouseleave', () => {
-    document.getElementById('chart-tooltip').style.display = 'none';
-  });
-
-  // Custom legend
-  document.getElementById('cmp-legend').innerHTML =
-    streams.map((s, i) =>
-      `<span class="cmp-legend-item">
-        <span class="cmp-legend-swatch" style="background:${palette[i]}"></span>${esc(s)}
-      </span>`
-    ).join('');
-
-  // Stats: count streams with data
-  const withData = streams.filter((_,i) => seriesData[i].some(v => v != null));
+  document.getElementById('cmp-stream-count').textContent = `${streams.length} streams`;
   document.getElementById('cmp-stats').textContent =
-    `${withData.length} of ${streams.length} stream${streams.length !== 1 ? 's' : ''} have data · ${fmtRangeLabel(from_ms, to_ms)}`;
+    `${streams.length} streams · ${pInfo.label} · ${fmtRangeLabel(from_ms, to_ms)}`;
+
+  // Re-apply search filter if box has content
+  const q = document.getElementById('cmp-search').value;
+  if (q) filterOverlay(q);
 }
+
+function filterOverlay(query) {
+  const wrap = document.getElementById('overlay-chart-wrap');
+  if (!_overlayTraces.length || !wrap.querySelector('.js-plotly-plot')) return;
+  const q = query.toLowerCase().trim();
+  const colors = _overlayTraces.map(t =>
+    !q || t.name.toLowerCase().includes(q) ? t.color : 'rgba(150,150,150,0.07)'
+  );
+  Plotly.restyle(wrap, { 'line.color': colors });
+  const matchCount = q ? colors.filter(c => !c.startsWith('rgba')).length : _overlayTraces.length;
+  document.getElementById('cmp-stream-count').textContent =
+    q ? `${matchCount} / ${_overlayTraces.length}` : `${_overlayTraces.length} streams`;
+}
+
 
 // ══════════════════════════════════════════════════════════
 // HEATMAP VIEW
