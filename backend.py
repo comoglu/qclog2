@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import traceback
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -352,7 +352,7 @@ class _APIHandler(BaseHTTPRequestHandler):
 
 def _start_api(db_path, port):
     _APIHandler.db_path = db_path
-    srv = HTTPServer(('127.0.0.1', port), _APIHandler)
+    srv = ThreadingHTTPServer(('127.0.0.1', port), _APIHandler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     print(f'[qclog2] API listening on 127.0.0.1:{port}/api/qc', flush=True)

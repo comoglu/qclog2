@@ -193,9 +193,10 @@ function initPicker(pickerEl, onApply) {
   });
 }
 
-async function fetchQCRange(from_ms, to_ms) {
-  const url = `${S.prefs.apiUrl}?from=${from_ms}&to=${to_ms}&_=${Date.now()}`;
-  const r   = await fetch(url);
+async function fetchQCRange(from_ms, to_ms, param = null) {
+  let url = `${S.prefs.apiUrl}?from=${from_ms}&to=${to_ms}&_=${Date.now()}`;
+  if (param) url += `&param=${encodeURIComponent(param)}`;
+  const r = await fetch(url);
   if (!r.ok) throw new Error(r.status);
   return r.json();
 }
@@ -518,7 +519,7 @@ async function loadChartData() {
 
   document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Loading…</div>';
   try {
-    S.histData = await fetchQCRange(from, to);
+    S.histData = await fetchQCRange(from, to, S.detailParam);
     drawChart();
   } catch(_) {
     document.getElementById('chart-wrap').innerHTML = '<div class="chart-loading">Failed to load history.</div>';
@@ -824,7 +825,7 @@ async function loadHistoryChart() {
   document.getElementById('history-stats').innerHTML = '';
   document.getElementById('history-table-wrap').innerHTML = '';
   try {
-    const data = await fetchQCRange(from, to);
+    const data = await fetchQCRange(from, to, param);
     drawHistoryChart(data, stream, param, from, to);
   } catch(_) {
     wrap.innerHTML = '<div class="chart-loading">Failed to load history data.</div>';
@@ -1500,7 +1501,7 @@ async function loadCompareChart() {
   document.getElementById('cmp-stats').innerHTML = '';
 
   try {
-    const data = await fetchQCRange(from, to);
+    const data = await fetchQCRange(from, to, param);
     drawCompareChart(data, streams, param, from, to);
   } catch(_) {
     document.getElementById('cmp-chart-wrap').innerHTML =
@@ -1627,7 +1628,7 @@ async function loadHeatmap() {
   document.getElementById('heatmap-canvas-wrap').innerHTML = '';
 
   try {
-    const data = await fetchQCRange(from, to);
+    const data = await fetchQCRange(from, to, param);
     renderHeatmap(data, param, from, to, data.bin_ms ?? 600_000);
   } catch(_) {
     document.getElementById('heatmap-labels').innerHTML =
