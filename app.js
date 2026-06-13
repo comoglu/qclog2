@@ -729,9 +729,14 @@ function renderGrid() {
 
   let html = '';
   for (const [nc, stList] of Object.entries(nets).sort()) {
-    html += `<div class="grid-net-group">
-      <div class="grid-net-title">${esc(nc)} — ${stList.length} station${stList.length !== 1 ? 's' : ''}</div>
-      <div class="grid-cards">`;
+    const okCount = stList.filter(([,,,st]) => st === 'ok').length;
+    html += `<div class="net-section">
+      <div class="net-header">
+        <span class="net-code">${esc(nc)}</span>
+        <span class="net-count">(${stList.length})</span>
+        <span class="net-ok-ratio">${okCount}/${stList.length} ok</span>
+      </div>
+      <div class="sta-grid">`;
     for (const [stid, stData, merged, st] of stList.sort(([a],[b]) => a.localeCompare(b)))
       html += buildGridCard(stid, merged, st, Object.keys(stData.streams).length);
     html += `</div></div>`;
@@ -741,22 +746,22 @@ function renderGrid() {
 
 function buildGridCard(stid, merged, worstSt, streamCount) {
   const sta = stid.split('.')[1];
-  const params = S.visibleParams.slice(0, 5);
-  const rows = params.map(p => {
-    const val = merged[p]?.v ?? null;
-    const st  = cellStatus(p, val);
-    return `<div class="card-param">
-      <span class="card-param-label">${PARAMS[p].label}</span>
-      <span class="card-param-val qc-${st}">${PARAMS[p].fmt(val)}</span>
-    </div>`;
-  }).join('');
-  return `<div class="grid-card qc-card-${worstSt}" title="${esc(stid)}">
-    <div class="card-hdr">
-      <span class="card-sta">${esc(sta)}</span>
-      <span class="card-badge qc-${worstSt}">${worstSt}</span>
-    </div>
-    <div class="card-params">${rows}</div>
-    <div class="card-footer">${streamCount} stream${streamCount !== 1 ? 's' : ''}</div>
+
+  // Find the param driving the worst status to display its value
+  const badParam = S.visibleParams.find(p => cellStatus(p, merged[p]?.v ?? null) === worstSt)
+    ?? S.visibleParams[0];
+  const val = badParam ? PARAMS[badParam]?.fmt(merged[badParam]?.v ?? null) : '—';
+  const lbl = badParam ? PARAMS[badParam]?.label : '';
+
+  // Rich tooltip: all visible QC values
+  const tip = [stid, streamCount + ' stream' + (streamCount !== 1 ? 's' : ''),
+    ...S.visibleParams.map(p => `${PARAMS[p].label}: ${PARAMS[p].fmt(merged[p]?.v ?? null)}`)
+  ].join('\n');
+
+  return `<div class="sta-card qc-${worstSt}" data-stid="${esc(stid)}" title="${esc(tip)}">
+    <span class="card-code">${esc(sta)}</span>
+    <span class="card-val">${esc(val)}</span>
+    <span class="card-lbl">${esc(lbl)}</span>
   </div>`;
 }
 
@@ -1490,14 +1495,14 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
 }
 
 function filterOverlay(query) {
+  if (!_overlayTraces.length) return;
   const wrap = document.getElementById('overlay-chart-wrap');
-  if (!_overlayTraces.length || !wrap.querySelector('.js-plotly-plot')) return;
   const q = query.toLowerCase().trim();
   const colors = _overlayTraces.map(t =>
     !q || t.name.toLowerCase().includes(q) ? t.color : 'rgba(150,150,150,0.07)'
   );
-  Plotly.restyle(wrap, 'line.color', colors);
-  const matchCount = q ? colors.filter(c => !c.startsWith('rgba')).length : _overlayTraces.length;
+  try { Plotly.restyle(wrap, {'line.color': colors}); } catch(_) {}
+  const matchCount = !q ? _overlayTraces.length : colors.filter(c => !c.startsWith('rgba')).length;
   document.getElementById('cmp-stream-count').textContent =
     q ? `${matchCount} / ${_overlayTraces.length}` : `${_overlayTraces.length} streams`;
 }
