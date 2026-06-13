@@ -1534,9 +1534,16 @@ function filterOverlay(query) {
     if (!_allOverlayTraces.length) return;
     const wrap = document.getElementById('overlay-chart-wrap');
     const q     = query.toLowerCase().trim();
-    const terms = q ? q.split(',').map(t => t.trim()).filter(Boolean) : [];
-    const subset = terms.length
-      ? _allOverlayTraces.filter(t => terms.some(term => (t.name || '').toLowerCase().includes(term)))
+    const terms   = q ? q.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const include = terms.filter(t => !t.startsWith('!'));
+    const exclude = terms.filter(t =>  t.startsWith('!')).map(t => t.slice(1));
+    const subset  = terms.length
+      ? _allOverlayTraces.filter(t => {
+          const name = (t.name || '').toLowerCase();
+          const pass = include.length === 0 || include.some(term => name.includes(term));
+          const block = exclude.some(term => name.includes(term));
+          return pass && !block;
+        })
       : _allOverlayTraces;
     const yax = { ..._overlayLayout.yaxis };
     if (terms.length) {
