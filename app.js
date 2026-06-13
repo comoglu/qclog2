@@ -1265,6 +1265,12 @@ function initEvents() {
   // Overlay view — auto-loads on param change; search filters without reload
   document.getElementById('cmp-param').addEventListener('change', () => { if (S.view === 'compare') loadOverlay(); });
   document.getElementById('cmp-search').addEventListener('input', e => filterOverlay(e.target.value));
+  document.getElementById('overlay-legend-btn').addEventListener('click', e => {
+    const btn  = e.currentTarget;
+    const show = btn.classList.toggle('active');
+    const wrap = document.getElementById('overlay-chart-wrap');
+    if (wrap.classList.contains('js-plotly-plot')) Plotly.relayout(wrap, { showlegend: show });
+  });
   // Heatmap view
   document.getElementById('hm-load-btn').addEventListener('click', loadHeatmap);
 
@@ -1488,7 +1494,16 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
     font:   { color: isDark ? '#94a3b8' : '#475569', size: 11 },
     xaxis:  { type: 'date', gridcolor: gridCol, linecolor: gridCol, zeroline: false },
     yaxis:  { title: { text: pInfo.unit, standoff: 8 }, gridcolor: gridCol, linecolor: gridCol, zeroline: false },
-    showlegend: false,
+    showlegend: document.getElementById('overlay-legend-btn')?.classList.contains('active') ?? false,
+    legend: {
+      font:            { size: 10 },
+      bgcolor:         isDark ? 'rgba(30,41,59,0.85)' : 'rgba(255,255,255,0.85)',
+      bordercolor:     gridCol,
+      borderwidth:     1,
+      tracegroupgap:   0,
+      itemclick:       'toggle',
+      itemdoubleclick: 'toggleothers',
+    },
     hovermode:  'closest',
     shapes,
     height: Math.max(340, window.innerHeight - 240),
