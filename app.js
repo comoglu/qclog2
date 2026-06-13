@@ -104,6 +104,12 @@ const S = {
 // ══════════════════════════════════════════════════════════
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
+function posTooltip(tt, cx, cy) {
+  const tw = tt.offsetWidth || 180, th = tt.offsetHeight || 60;
+  tt.style.left = (cx + 14 + tw > window.innerWidth  ? cx - tw - 10 : cx + 14) + 'px';
+  tt.style.top  = (cy + 14 + th > window.innerHeight ? cy - th - 10 : cy + 14) + 'px';
+}
+
 function fmtSec(s) {
   if (s == null || s < 0) return '—';
   if (s < 60)    return `${s.toFixed(1)}s`;
@@ -1490,7 +1496,7 @@ function filterOverlay(query) {
   const colors = _overlayTraces.map(t =>
     !q || t.name.toLowerCase().includes(q) ? t.color : 'rgba(150,150,150,0.07)'
   );
-  Plotly.restyle(wrap, { 'line.color': colors });
+  Plotly.restyle(wrap, 'line.color', colors);
   const matchCount = q ? colors.filter(c => !c.startsWith('rgba')).length : _overlayTraces.length;
   document.getElementById('cmp-stream-count').textContent =
     q ? `${matchCount} / ${_overlayTraces.length}` : `${_overlayTraces.length} streams`;
