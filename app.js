@@ -1511,11 +1511,24 @@ function filterOverlay(query) {
     const subset = terms.length
       ? _allOverlayTraces.filter(t => terms.some(term => (t.name || '').toLowerCase().includes(term)))
       : _allOverlayTraces;
-    // Strip baked-in ranges so Plotly autoranges from the subset
+    const yax = { ..._overlayLayout.yaxis };
+    if (terms.length) {
+      // Threshold shapes force the axis to 0-300 etc; compute range from data only
+      const allY = subset.flatMap(t => (t.y || []).filter(v => v != null && isFinite(v)));
+      if (allY.length) {
+        const lo = Math.min(...allY), hi = Math.max(...allY);
+        const pad = (hi - lo) * 0.15 || Math.abs(hi) * 0.1 || 1;
+        yax.autorange = false;
+        yax.range = [lo - pad, hi + pad];
+      }
+    } else {
+      yax.autorange = true;
+      delete yax.range;
+    }
     const layout = {
       ..._overlayLayout,
       xaxis: { ..._overlayLayout.xaxis, autorange: true, range: undefined },
-      yaxis: { ..._overlayLayout.yaxis, autorange: true, range: undefined },
+      yaxis: yax,
     };
     Plotly.react(wrap, subset, layout, _overlayConfig);
     const n = subset.length, total = _allOverlayTraces.length;
