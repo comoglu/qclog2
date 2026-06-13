@@ -1497,7 +1497,7 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
 
 function filterOverlay(query) {
   clearTimeout(_searchDebounce);
-  _searchDebounce = setTimeout(() => {
+  _searchDebounce = setTimeout(async () => {
     const wrap = document.getElementById('overlay-chart-wrap');
     if (!wrap.data?.length) return;
     const q = query.toLowerCase().trim();
@@ -1507,11 +1507,13 @@ function filterOverlay(query) {
         const name = (t.name || '').toLowerCase();
         return terms.some(term => name.includes(term));
       });
-      Plotly.restyle(wrap, { visible });
+      await Plotly.restyle(wrap, { visible });
+      Plotly.relayout(wrap, { 'yaxis.autorange': true });
       const n = visible.filter(Boolean).length;
       document.getElementById('cmp-stream-count').textContent = `${n} / ${wrap.data.length}`;
     } else {
-      Plotly.restyle(wrap, { visible: true });
+      await Plotly.restyle(wrap, { visible: true });
+      Plotly.relayout(wrap, { 'yaxis.autorange': true });
       document.getElementById('cmp-stream-count').textContent = `${wrap.data.length} streams`;
     }
   }, 200);
