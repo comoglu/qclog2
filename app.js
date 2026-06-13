@@ -1408,7 +1408,8 @@ function netColor(stream) {
   return NET_COLORS[stream.split('.')[0]] ?? NET_COLOR_FALLBACK;
 }
 
-let _overlayTraces = [];  // [{ name, color }] — kept for filterOverlay
+let _overlayTraces = [];   // [{ name, color }] — kept for theme-reload check
+let _searchDebounce = null;
 
 async function loadOverlay() {
   const param  = document.getElementById('cmp-param')?.value;
@@ -1495,16 +1496,21 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
 }
 
 function filterOverlay(query) {
-  if (!_overlayTraces.length) return;
-  const wrap = document.getElementById('overlay-chart-wrap');
-  const q = query.toLowerCase().trim();
-  const colors = _overlayTraces.map(t =>
-    !q || t.name.toLowerCase().includes(q) ? t.color : 'rgba(150,150,150,0.07)'
-  );
-  try { Plotly.restyle(wrap, {'line.color': colors}); } catch(_) {}
-  const matchCount = !q ? _overlayTraces.length : colors.filter(c => !c.startsWith('rgba')).length;
-  document.getElementById('cmp-stream-count').textContent =
-    q ? `${matchCount} / ${_overlayTraces.length}` : `${_overlayTraces.length} streams`;
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(() => {
+    const wrap = document.getElementById('overlay-chart-wrap');
+    if (!wrap.data?.length) return;
+    const q = query.toLowerCase().trim();
+    if (q) {
+      const visible = wrap.data.map(t => (t.name || '').toLowerCase().includes(q));
+      Plotly.restyle(wrap, { visible });
+      const n = visible.filter(Boolean).length;
+      document.getElementById('cmp-stream-count').textContent = `${n} / ${wrap.data.length}`;
+    } else {
+      Plotly.restyle(wrap, { visible: true });
+      document.getElementById('cmp-stream-count').textContent = `${wrap.data.length} streams`;
+    }
+  }, 200);
 }
 
 
