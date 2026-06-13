@@ -1475,7 +1475,7 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
     const color = netColor(s);
     return {
       name: s,
-      x:    pts.map(([t]) => new Date(t)),
+      x:    pts.map(([t]) => new Date(t).toISOString().slice(0, 19).replace('T', ' ')),
       y:    pts.map(([,v]) => v),
       type: 'scatter',
       mode: 'lines',
