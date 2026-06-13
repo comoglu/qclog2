@@ -340,13 +340,14 @@ function switchView(v) {
     s.classList.toggle('active', s.id === 'view-' + v));
   document.querySelectorAll('.tab').forEach(t =>
     t.classList.toggle('active', t.dataset.view === v));
-  if (v === 'map' || v === 'history' || v === 'compare' || v === 'heatmap' || v === 'events') closeChart();
+  if (v === 'map' || v === 'history' || v === 'overlay' || v === 'heatmap' || v === 'events') closeChart();
   if (v !== 'history' && _histPlot) { _histPlot.destroy(); _histPlot = null; }
-  if (v === 'map')             { initMap(); if (S.data) refreshMapMarkers(); }
+  if (v === 'map')              { initMap(); if (S.data) refreshMapMarkers(); }
   if (v === 'grid'    && S.data) renderGrid();
   if (v === 'table'   && S.data) renderTable();
-  if (v === 'compare') loadOverlay();
-  if (v === 'events')  renderEvents();
+  if (v === 'overlay')  loadOverlay();
+  if (v === 'heatmap')  loadHeatmap();
+  if (v === 'events')   renderEvents();
 }
 
 // ── Status bar ──────────────────────────────────────────────
@@ -1198,7 +1199,7 @@ function initEvents() {
     document.body.classList.toggle('dark', S.theme === 'dark');
     savePrefs();
     if (S.uplot && S.detailStream) drawChart();
-    if (S.view === 'compare' && _overlayTraces.length) loadOverlay();
+    if (S.view === 'overlay' && _overlayTraces.length) loadOverlay();
   });
   document.getElementById('panel-close').addEventListener('click', closeChart);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeChart(); });
@@ -1247,7 +1248,7 @@ function initEvents() {
 
   initPicker(document.querySelector('#chart-panel   .tpick'), () => { if (S.detailStream) loadChartData(); });
   initPicker(document.querySelector('#view-history  .tpick'), () => { /* load triggered by Load btn */ });
-  initPicker(document.querySelector('#view-compare  .tpick'), () => { if (S.view === 'compare') loadOverlay(); });
+  initPicker(document.querySelector('#view-overlay  .tpick'), () => { if (S.view === 'overlay') loadOverlay(); });
   initPicker(document.querySelector('#view-heatmap  .tpick'), () => { /* load triggered by Load btn */ });
 
   // Watchlist-only toggle
@@ -1263,7 +1264,7 @@ function initEvents() {
   document.getElementById('notif-toggle').addEventListener('click', toggleNotifications);
 
   // Overlay view — auto-loads on param change; search filters without reload
-  document.getElementById('cmp-param').addEventListener('change', () => { if (S.view === 'compare') loadOverlay(); });
+  document.getElementById('cmp-param').addEventListener('change', () => { if (S.view === 'overlay') loadOverlay(); });
   document.getElementById('cmp-search').addEventListener('input', e => filterOverlay(e.target.value));
   document.getElementById('overlay-legend-btn').addEventListener('click', e => {
     const btn  = e.currentTarget;
@@ -1434,7 +1435,7 @@ let _searchDebounce  = null;
 
 async function loadOverlay() {
   const param  = document.getElementById('cmp-param')?.value;
-  const picker = document.querySelector('#view-compare .tpick');
+  const picker = document.querySelector('#view-overlay .tpick');
   if (!param || !picker) return;
 
   const wrap = document.getElementById('overlay-chart-wrap');
