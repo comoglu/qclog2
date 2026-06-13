@@ -1408,8 +1408,11 @@ function netColor(stream) {
   return NET_COLORS[stream.split('.')[0]] ?? NET_COLOR_FALLBACK;
 }
 
-let _overlayTraces = [];   // [{ name, color }] — kept for theme-reload check
-let _searchDebounce = null;
+let _overlayTraces = [];      // [{ name, color }] — kept for theme-reload check
+let _allOverlayTraces = [];   // full trace array saved for Plotly.react on filter
+let _overlayLayout   = null;
+let _overlayConfig   = null;
+let _searchDebounce  = null;
 
 async function loadOverlay() {
   const param  = document.getElementById('cmp-param')?.value;
@@ -1484,6 +1487,9 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
     modeBarButtonsToRemove: ['select2d', 'lasso2d', 'autoScale2d'],
   };
 
+  _allOverlayTraces = traces;
+  _overlayLayout    = layout;
+  _overlayConfig    = config;
   Plotly.newPlot(wrap, traces, layout, config);
 
   document.getElementById('cmp-stream-count').textContent = `${streams.length} streams`;
@@ -1497,25 +1503,19 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
 
 function filterOverlay(query) {
   clearTimeout(_searchDebounce);
-  _searchDebounce = setTimeout(async () => {
+  _searchDebounce = setTimeout(() => {
+    if (!_allOverlayTraces.length) return;
     const wrap = document.getElementById('overlay-chart-wrap');
-    if (!wrap.data?.length) return;
-    const q = query.toLowerCase().trim();
-    if (q) {
-      const terms = q.split(',').map(t => t.trim()).filter(Boolean);
-      const visible = wrap.data.map(t => {
-        const name = (t.name || '').toLowerCase();
-        return terms.some(term => name.includes(term));
-      });
-      await Plotly.restyle(wrap, { visible });
-      Plotly.relayout(wrap, { 'yaxis.autorange': true });
-      const n = visible.filter(Boolean).length;
-      document.getElementById('cmp-stream-count').textContent = `${n} / ${wrap.data.length}`;
-    } else {
-      await Plotly.restyle(wrap, { visible: true });
-      Plotly.relayout(wrap, { 'yaxis.autorange': true });
-      document.getElementById('cmp-stream-count').textContent = `${wrap.data.length} streams`;
-    }
+    const q     = query.toLowerCase().trim();
+    const terms = q ? q.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const subset = terms.length
+      ? _allOverlayTraces.filter(t => terms.some(term => (t.name || '').toLowerCase().includes(term)))
+      : _allOverlayTraces;
+    // react re-renders with only the subset traces → correct autorange for any param
+    Plotly.react(wrap, subset, _overlayLayout, _overlayConfig);
+    const n = subset.length, total = _allOverlayTraces.length;
+    document.getElementById('cmp-stream-count').textContent =
+      q ? `${n} / ${total}` : `${total} streams`;
   }, 200);
 }
 
