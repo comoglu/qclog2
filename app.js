@@ -1502,7 +1502,11 @@ function filterOverlay(query) {
     if (!wrap.data?.length) return;
     const q = query.toLowerCase().trim();
     if (q) {
-      const visible = wrap.data.map(t => (t.name || '').toLowerCase().includes(q));
+      const terms = q.split(',').map(t => t.trim()).filter(Boolean);
+      const visible = wrap.data.map(t => {
+        const name = (t.name || '').toLowerCase();
+        return terms.some(term => name.includes(term));
+      });
       Plotly.restyle(wrap, { visible });
       const n = visible.filter(Boolean).length;
       document.getElementById('cmp-stream-count').textContent = `${n} / ${wrap.data.length}`;
