@@ -1511,8 +1511,13 @@ function filterOverlay(query) {
     const subset = terms.length
       ? _allOverlayTraces.filter(t => terms.some(term => (t.name || '').toLowerCase().includes(term)))
       : _allOverlayTraces;
-    // react re-renders with only the subset traces → correct autorange for any param
-    Plotly.react(wrap, subset, _overlayLayout, _overlayConfig);
+    // Strip baked-in ranges so Plotly autoranges from the subset
+    const layout = {
+      ..._overlayLayout,
+      xaxis: { ..._overlayLayout.xaxis, autorange: true, range: undefined },
+      yaxis: { ..._overlayLayout.yaxis, autorange: true, range: undefined },
+    };
+    Plotly.react(wrap, subset, layout, _overlayConfig);
     const n = subset.length, total = _allOverlayTraces.length;
     document.getElementById('cmp-stream-count').textContent =
       q ? `${n} / ${total}` : `${total} streams`;
