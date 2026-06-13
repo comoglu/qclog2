@@ -1227,6 +1227,18 @@ function initEvents() {
     }
   });
 
+  // Grid card click → jump to Table view filtered to that station
+  document.getElementById('grid-wrap').addEventListener('click', e => {
+    const card = e.target.closest('.sta-card');
+    if (!card) return;
+    const stid = card.dataset.stid;
+    if (!stid) return;
+    const sta = stid.split('.')[1] || stid;
+    S.filter.search = sta;
+    document.getElementById('search').value = sta;
+    switchView('table');
+  });
+
   // Time pickers — inject HTML then wire each one
   document.getElementById('tpick-panel').innerHTML   = timePickerHtml(86_400_000);
   document.getElementById('tpick-history').innerHTML = timePickerHtml(86_400_000);

@@ -2,19 +2,17 @@
 
 A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP's `QC` messaging group via `scmaster`, stores measurements in SQLite, and periodically writes JSON files that the frontend polls. No build step — the frontend is plain HTML/CSS/JS served statically.
 
-![Heatmap view showing 219 streams over 7 days](vendor/images/screenshot_placeholder.png)
-
 ---
 
 ## Features
 
-- **Table view** — colour-coded grid of the latest value for every stream × parameter combination; click any cell to open a sparkline chart panel
-- **Grid view** — station-level cards aggregating worst status per station
+- **Table view** — colour-coded grid of the latest value for every stream × parameter; click any cell to open a side-panel chart
+- **Grid view** — compact 72 × 54 px station cards coloured by worst QC status, grouped by network; click any card to jump to Table view filtered to that station
 - **Map view** — Leaflet map with clustered markers coloured by QC status; coordinates fetched from FDSNWS
-- **History tab** — single-stream uPlot chart for 1h / 6h / 24h / 7d ranges with statistics
-- **Overlay tab** — multi-stream overlay chart; network-grouped stream selector with search and "Top 10 worst" shortcut
-- **Heatmap tab** — canvas-based grid (streams × time bins) for quick visual pattern detection across all streams
-- **Events log** — automatically detects status transitions on every refresh cycle; browser notifications on alert/recovery
+- **History tab** — single-stream chart with presets 1 h / 6 h / 12 h / 24 h / 36 h / 3 d / 7 d / 14 d / 30 d / Custom date range
+- **Overlay tab** — Plotly multi-stream overlay for all streams on a single chart; comma-separated search filter with auto Y-axis rescaling
+- **Heatmap tab** — canvas-based grid (streams × time bins) for pattern detection across all streams
+- **Events log** — detects status transitions on every refresh cycle; browser notifications on alert/recovery
 - **Configurable thresholds** — per-parameter warn/alert levels stored in `localStorage`; applied live to all views
 - **Watchlist** — bookmark specific streams; filter to watchlisted streams only
 - **Dark/light theme toggle**
@@ -57,9 +55,11 @@ Edit `$DEPLOY/config.json`:
 | `db_path` | Path to the SQLite database file | `…/qclog2/qc.db` |
 | `output_dir` | Directory where JSON files are written | same as `db_path` parent |
 | `json_interval` | Seconds between JSON writes | `60` |
-| `raw_retention_h` | Hours to keep raw QC rows before rolling up to hourly | `25` |
+| `raw_retention_h` | Hours to keep raw QC rows before rolling up to hourly | `72` |
 | `hourly_retention_d` | Days to keep hourly rollup rows | `30` |
 | `fdsnws` | FDSNWS base URL for station coordinates. Use a relative path (e.g. `/fdsnws`) if nginx proxies it; use a full URL only if the service is directly reachable from the browser. | `/fdsnws` |
+| `api_port` | Port for the on-demand HTTP API (used by Custom time-range queries) | `8765` |
+| `api_url` | URL prefix for the HTTP API as seen from the browser | `/api/qc` |
 
 ### 3. Install as a systemd service
 
@@ -163,15 +163,18 @@ Backfill regenerates `qc_current.json`, `qc_24h.json`, and `qc_7d.json` when it 
 ```
 scqc → scmaster → backend.py handleMessage()
                        │
-                  qc_raw (SQLite)          ← raw rows, kept ~25 h
+                  qc_raw (SQLite)          ← raw rows, kept 72 h
                        │  (hourly rollup)
                   qc_hourly (SQLite)       ← hourly avg/min/max, kept 30 d
                        │  (every json_interval)
-          qc_current.json  qc_24h.json    ← frontend polls these
+          qc_current.json                 ← latest values + hourly sparkline
+          qc_24h.json                     ← 10-min bins, last 24 h
+          qc_3d.json                      ← 10-min bins, last 3 d
                        │  (every hour)
-                  qc_7d.json
+          qc_7d.json                      ← hourly averages, last 7 d
+          qc_30d.json                     ← hourly averages, last 30 d
                        │  (every json_interval)
-                  health.json             ← alive check: ts, stream count, message count
+          health.json                     ← alive check: ts, stream count, msg count
 ```
 
 ### Backend (`backend.py`)
@@ -180,7 +183,9 @@ scqc → scmaster → backend.py handleMessage()
 - Inserts are buffered (flush every 100 rows or `json_interval`)
 - `_write_current()` — latest value + 24-point hourly sparkline per (stream, parameter)
 - `_write_24h()` — 10-minute bins over the last 24 h from `qc_raw`
+- `_write_3d()` — 10-minute bins over the last 3 d from `qc_raw`
 - `_write_7d()` — hourly averages over the last 7 d from `qc_hourly`
+- `_write_30d()` — hourly averages over the last 30 d from `qc_hourly`
 - `_write_health()` — alive check JSON: timestamp, distinct stream count, total message count
 - `_rollup_hourly()` — moves `qc_raw` rows older than `raw_retention_h` into `qc_hourly`, prunes old hourly rows, checkpoints the WAL
 
@@ -189,7 +194,8 @@ scqc → scmaster → backend.py handleMessage()
 Single global state object `S`. No framework, no build step.
 
 - Polls `qc_current.json` on a configurable interval (default 60 s)
-- Charts rendered with [uPlot](https://github.com/leeoniya/uPlot)
+- History/Overlay time-range queries route to the right pre-built JSON file based on the selected span; Custom range queries the on-demand HTTP API
+- Charts rendered with [uPlot](https://github.com/leeoniya/uPlot) (History, side panel) and [Plotly.js](https://plotly.com/javascript/) (Overlay)
 - Map rendered with [Leaflet](https://leafletjs.com/) + [Leaflet.MarkerCluster](https://github.com/Leaflet/Leaflet.markercluster)
 - All user preferences (thresholds, watchlist, FDSNWS URL) persisted to `localStorage`
 
@@ -247,6 +253,7 @@ All vendor libraries are bundled — no CDN dependency.
 | [Leaflet](https://leafletjs.com/) | 1.9.x | BSD-2-Clause |
 | [Leaflet.MarkerCluster](https://github.com/Leaflet/Leaflet.markercluster) | 1.5.x | MIT |
 | [uPlot](https://github.com/leeoniya/uPlot) | 1.6.x | MIT |
+| [Plotly.js](https://plotly.com/javascript/) (basic build) | 2.35.2 | MIT |
 
 ---
 
