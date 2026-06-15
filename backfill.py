@@ -21,6 +21,7 @@ Config is read from config.json next to this file (same as backend.py).
 """
 
 from __future__ import print_function
+import csv
 import json
 import os
 import sqlite3
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -261,6 +263,64 @@ def _import_from_sqlite(source_path, dest_db, days):
     src.close()
 
 
+# ── Mode C: import from MariaDB CSV export ────────────────────────────────────
+
+def _import_from_csv(csv_path, dest_db):
+    """Import from a MariaDB INTO OUTFILE CSV of WaveformQuality.
+
+    Expected columns (no header):
+      networkCode, stationCode, locationCode, channelCode, parameter, start, value
+
+    Generate with:
+      SELECT COALESCE(waveformID_networkCode,''),
+             COALESCE(waveformID_stationCode,''),
+             COALESCE(waveformID_locationCode,''),
+             COALESCE(waveformID_channelCode,''),
+             parameter, start, value
+      FROM WaveformQuality
+      WHERE start >= '2026-06-13 01:50:00' AND start < '2026-06-14 09:00:00'
+      INTO OUTFILE '/tmp/wq_gap.csv'
+      FIELDS TERMINATED BY ',' LINES TERMINATED BY '\\n';
+    """
+    buf   = []
+    count = 0
+    skip  = 0
+    with open(csv_path, newline='', encoding='utf-8') as fh:
+        for row in csv.reader(fh):
+            if len(row) < 7:
+                skip += 1
+                continue
+            net, sta, loc, cha, raw_param, start_str, raw_value = row[:7]
+            param = _norm_param(raw_param)
+            if param is None:
+                skip += 1
+                continue
+            try:
+                dt = datetime.strptime(start_str.strip(), '%Y-%m-%d %H:%M:%S')
+                ts_ms = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+                value = float(raw_value)
+            except (ValueError, OSError):
+                skip += 1
+                continue
+            stream = f'{net}.{sta}.{loc}.{cha}'
+            buf.append((stream, ts_ms, param, value))
+            count += 1
+            if len(buf) >= 500:
+                dest_db.executemany(
+                    'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value)'
+                    ' VALUES (?,?,?,?)', buf)
+                dest_db.commit()
+                buf.clear()
+                print(f'[backfill]   {count} rows inserted, {skip} skipped…',
+                      end='\r', flush=True)
+    if buf:
+        dest_db.executemany(
+            'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value)'
+            ' VALUES (?,?,?,?)', buf)
+        dest_db.commit()
+    print(f'\n[backfill] CSV import done: {count} rows inserted, {skip} skipped.')
+
+
 # ── Mode A: SeisComP application ──────────────────────────────────────────────
 
 class BackfillApp(client.Application):
@@ -276,6 +336,7 @@ class BackfillApp(client.Application):
         self._raw_ret_h  = cfg.get('raw_retention_h', 25)
         self._days       = 7
         self._source_db  = None
+        self._source_csv = None
 
     def createCommandLineDescription(self):
         self.commandline().addGroup('Backfill')
@@ -285,6 +346,9 @@ class BackfillApp(client.Application):
         self.commandline().addStringOption(
             'Backfill', 'source-db',
             'Mode B: import from another qclog2 SQLite DB instead of SeisComP database')
+        self.commandline().addStringOption(
+            'Backfill', 'source-csv',
+            'Mode C: import from a MariaDB CSV export of WaveformQuality')
         return True
 
     def validateParameters(self):
@@ -298,6 +362,10 @@ class BackfillApp(client.Application):
             self._source_db = self.commandline().optionString('source-db')
         except RuntimeError:
             pass
+        try:
+            self._source_csv = self.commandline().optionString('source-csv')
+        except RuntimeError:
+            pass
         if self._days < 1 or self._days > 365:
             print('[backfill] --days must be between 1 and 365', file=sys.stderr)
             return False
@@ -309,7 +377,11 @@ class BackfillApp(client.Application):
         print(f'[backfill] Output: {self._output_dir}')
         print(f'[backfill] Days:   {self._days}')
 
-        if self._source_db:
+        if self._source_csv:
+            # ── Mode C ──────────────────────────────────────────────────
+            print(f'[backfill] Mode C: importing from CSV {self._source_csv}')
+            _import_from_csv(self._source_csv, local_db)
+        elif self._source_db:
             # ── Mode B ──────────────────────────────────────────────────
             print(f'[backfill] Mode B: importing from {self._source_db}')
             _import_from_sqlite(self._source_db, local_db, self._days)
