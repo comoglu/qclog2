@@ -8,8 +8,8 @@ handling real-time data from the messaging system independently.
 
 Two modes:
 
-  A) From the SeisComP database (recommended — needs -H host):
-       seiscomp-python backfill.py -H localhost [--days 7]
+  A) From the SeisComP database (recommended — needs -d for the DB connection):
+       python3 backfill.py -d localhost --days 7
 
   B) From another qclog2 SQLite DB (offline, no scmaster needed):
        seiscomp-python backfill.py --source-db /path/to/qc.db [--days 30]
@@ -35,7 +35,7 @@ def _adopt_scmaster_env():
     """Copy environment from the running scmaster process.
 
     Mirrors what run_backfill.sh does in bash, so this script can be
-    invoked directly (python3 backfill.py -H localhost --days 4) without
+    invoked directly (python3 backfill.py -d localhost --days 4) without
     a wrapper that pre-loads the SeisComP environment.
     """
     try:
@@ -319,7 +319,7 @@ class BackfillApp(client.Application):
             db = self.database()
             if not db:
                 print('[backfill] ERROR: no database connection.\n'
-                      '  Check that -H <host> is set and the SeisComP database is reachable.\n'
+                      '  Check that -d <connection> is set and the SeisComP database is reachable.\n'
                       '  Alternatively use --source-db to import from another qclog2 DB.',
                       file=sys.stderr)
                 return False
