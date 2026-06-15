@@ -336,54 +336,63 @@ class BackfillApp(client.Application):
             local_db.execute('DELETE FROM qc_raw WHERE time_ms >= ?', (cutoff_ms,))
             local_db.commit()
 
-            buf   = []
-            count = 0
+            buf     = []
+            count   = 0
             skipped = 0
 
-            print('[backfill] Executing SC database query (may take a minute)…', flush=True)
-            try:
-                it = query.getWaveformQuality(sc_start, sc_end)
-                print('[backfill] Streaming rows…', flush=True)
-                while it.get():
-                    wfq = datamodel.WaveformQuality.Cast(it.get())
-                    if wfq:
-                        wid    = wfq.waveformID()
-                        stream = (f'{wid.networkCode()}.{wid.stationCode()}.'
-                                  f'{wid.locationCode()}.{wid.channelCode()}')
-                        ts_ms  = _sc_time_to_ms(wfq.start())
-                        param  = _norm_param(wfq.parameter())
-                        if param is None:
-                            skipped += 1
-                            it.next()
-                            continue
-                        value  = wfq.value()
-                        buf.append((stream, ts_ms, param, value))
-                        count += 1
-                        if len(buf) >= 500:
-                            local_db.executemany(
-                                'INSERT INTO qc_raw (stream, time_ms, parameter, value)'
-                                ' VALUES (?,?,?,?)',
-                                buf)
-                            local_db.commit()
-                            buf.clear()
-                            print(f'[backfill]   {count} rows inserted, {skipped} skipped…',
-                                  end='\r', flush=True)
-                    it.next()
-
-            except Exception:
-                # Flush whatever was buffered before giving up
-                if buf:
-                    try:
+            # Query one day at a time — a single multi-day query can be very
+            # slow on large SC databases (full table scan, millions of rows).
+            day_ms = 86_400_000
+            for day in range(self._days, 0, -1):
+                d_start_ms = now_ms - day * day_ms
+                d_end_ms   = d_start_ms + day_ms
+                d_start    = core.Time(d_start_ms // 1000, (d_start_ms % 1000) * 1000)
+                d_end      = core.Time(d_end_ms   // 1000, (d_end_ms   % 1000) * 1000)
+                day_label  = f'day {self._days - day + 1}/{self._days}'
+                print(f'[backfill] Querying {day_label}…', flush=True)
+                try:
+                    it = query.getWaveformQuality(d_start, d_end)
+                    while it.get():
+                        wfq = datamodel.WaveformQuality.Cast(it.get())
+                        if wfq:
+                            wid    = wfq.waveformID()
+                            stream = (f'{wid.networkCode()}.{wid.stationCode()}.'
+                                      f'{wid.locationCode()}.{wid.channelCode()}')
+                            ts_ms  = _sc_time_to_ms(wfq.start())
+                            param  = _norm_param(wfq.parameter())
+                            if param is None:
+                                skipped += 1
+                                it.next()
+                                continue
+                            value = wfq.value()
+                            buf.append((stream, ts_ms, param, value))
+                            count += 1
+                            if len(buf) >= 500:
+                                local_db.executemany(
+                                    'INSERT INTO qc_raw (stream, time_ms, parameter, value)'
+                                    ' VALUES (?,?,?,?)',
+                                    buf)
+                                local_db.commit()
+                                buf.clear()
+                                print(f'[backfill]   {count} rows inserted, {skipped} skipped…',
+                                      end='\r', flush=True)
+                        it.next()
+                    # Flush remainder for this day
+                    if buf:
                         local_db.executemany(
-                            'INSERT INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
+                            'INSERT INTO qc_raw (stream, time_ms, parameter, value)'
+                            ' VALUES (?,?,?,?)',
                             buf)
                         local_db.commit()
-                    except Exception:
-                        pass
-                print('\n[backfill] ERROR querying SeisComP database:', file=sys.stderr)
-                traceback.print_exc()
-                print('\n[backfill] Hint: try --source-db mode as a fallback.', file=sys.stderr)
-                return False
+                        buf.clear()
+                    print(f'[backfill]   {count} rows inserted so far ({day_label} done)',
+                          flush=True)
+
+                except Exception:
+                    print(f'\n[backfill] ERROR on {day_label}:', file=sys.stderr)
+                    traceback.print_exc()
+                    print('[backfill] Hint: try --source-db mode as a fallback.', file=sys.stderr)
+                    return False
 
             if buf:
                 local_db.executemany(
