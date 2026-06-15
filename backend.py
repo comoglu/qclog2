@@ -235,12 +235,38 @@ def _write_7d(db, output_dir):
 
 
 def _write_3d(db, output_dir):
-    """qc_3d.json — last 3 days at 10-minute resolution from qc_raw."""
-    now_ms  = int(time.time() * 1000)
-    cutoff  = now_ms - 3 * 24 * 3600 * 1000
-    bin_ms  = 10 * 60 * 1000
+    """qc_3d.json — last 3 days at 10-minute resolution.
 
-    rows = db.execute('''
+    Uses qc_raw for the recent portion and falls back to qc_hourly for the
+    older portion that has already been rolled up, so the full 3-day window
+    is always populated regardless of raw_retention_h.
+    """
+    now_ms   = int(time.time() * 1000)
+    cutoff   = now_ms - 3 * 24 * 3600 * 1000
+    bin_ms   = 10 * 60 * 1000
+
+    # Find the oldest raw row so we know where to fill from qc_hourly.
+    oldest_raw = (db.execute('SELECT MIN(time_ms) FROM qc_raw').fetchone()[0]
+                  or now_ms)
+
+    streams = {}
+
+    def add_rows(rows):
+        for stream, param, bin_val, avg in rows:
+            streams.setdefault(stream, {}).setdefault(param, []).append(
+                [bin_val, round(avg, 4)])
+
+    # Hourly fill-in for the gap between 3d-ago and where raw starts.
+    if oldest_raw > cutoff:
+        add_rows(db.execute('''
+            SELECT stream, parameter, hour_ms AS bin, avg
+            FROM qc_hourly
+            WHERE hour_ms >= ? AND hour_ms < ?
+            ORDER BY stream, parameter, hour_ms
+        ''', (cutoff, oldest_raw)).fetchall())
+
+    # 10-minute bins from qc_raw for the recent portion.
+    add_rows(db.execute('''
         SELECT stream, parameter,
                (time_ms / ?) * ? AS bin,
                AVG(value) AS avg
@@ -248,15 +274,11 @@ def _write_3d(db, output_dir):
         WHERE time_ms >= ?
         GROUP BY stream, parameter, bin
         ORDER BY stream, parameter, bin
-    ''', (bin_ms, bin_ms, cutoff)).fetchall()
+    ''', (bin_ms, bin_ms, cutoff)).fetchall())
 
-    streams = {}
-    for stream, param, bin_val, avg in rows:
-        if stream not in streams:
-            streams[stream] = {}
-        if param not in streams[stream]:
-            streams[stream][param] = []
-        streams[stream][param].append([bin_val, round(avg, 4)])
+    for pdata in streams.values():
+        for pts in pdata.values():
+            pts.sort(key=lambda x: x[0])
 
     _atomic_write(
         Path(output_dir) / 'qc_3d.json',
