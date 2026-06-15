@@ -257,13 +257,21 @@ def _write_3d(db, output_dir):
                 [bin_val, round(avg, 4)])
 
     # Hourly fill-in for the gap between 3d-ago and where raw starts.
+    # Expand each hourly point into 6 x 10-min bins so the heatmap sees
+    # uniform 10-min resolution throughout (no 1-in-6 sparse holes).
     if oldest_raw > cutoff:
-        add_rows(db.execute('''
+        hourly = db.execute('''
             SELECT stream, parameter, hour_ms AS bin, avg
             FROM qc_hourly
             WHERE hour_ms >= ? AND hour_ms < ?
             ORDER BY stream, parameter, hour_ms
-        ''', (cutoff, oldest_raw)).fetchall())
+        ''', (cutoff, oldest_raw)).fetchall()
+        expanded = [
+            (stream, param, hour_bin + i * bin_ms, avg)
+            for stream, param, hour_bin, avg in hourly
+            for i in range(6)
+        ]
+        add_rows(expanded)
 
     # 10-minute bins from qc_raw for the recent portion.
     add_rows(db.execute('''
