@@ -24,10 +24,34 @@ from __future__ import print_function
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 import traceback
 from pathlib import Path
+
+
+def _adopt_scmaster_env():
+    """Copy environment from the running scmaster process.
+
+    Mirrors what run_backfill.sh does in bash, so this script can be
+    invoked directly (python3 backfill.py -H localhost --days 4) without
+    a wrapper that pre-loads the SeisComP environment.
+    """
+    try:
+        pid = subprocess.check_output(
+            ['pgrep', '-f', 'scmaster'], text=True
+        ).split()[0].strip()
+        with open(f'/proc/{pid}/environ', 'rb') as fh:
+            for item in fh.read().split(b'\x00'):
+                if b'=' in item:
+                    key, _, val = item.partition(b'=')
+                    os.environ.setdefault(key.decode(), val.decode())
+    except Exception:
+        pass  # not on Linux or scmaster not running — proceed as-is
+
+
+_adopt_scmaster_env()
 
 from seiscomp import core, client, datamodel
 
