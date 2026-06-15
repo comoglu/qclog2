@@ -77,9 +77,11 @@ PARAM_ORDER = [
     'availability', 'delay', 'latency', 'timing_quality',
     'rms', 'offset', 'gaps_count', 'overlaps_count', 'spikes_count', 'outage',
 ]
+KNOWN_PARAMS = set(PARAM_ORDER)
 
 def _norm_param(p):
-    return _PARAM_MAP.get(p.lower().strip(), p.lower().replace(' ', '_'))
+    normalized = _PARAM_MAP.get(p.lower().strip(), p.lower().replace(' ', '_'))
+    return normalized if normalized in KNOWN_PARAMS else None
 
 def _sc_time_to_ms(t):
     return t.seconds() * 1000 + t.microseconds() // 1000
@@ -336,9 +338,12 @@ class BackfillApp(client.Application):
 
             buf   = []
             count = 0
+            skipped = 0
 
+            print('[backfill] Executing SC database query (may take a minute)…', flush=True)
             try:
                 it = query.getWaveformQuality(sc_start, sc_end)
+                print('[backfill] Streaming rows…', flush=True)
                 while it.get():
                     wfq = datamodel.WaveformQuality.Cast(it.get())
                     if wfq:
@@ -347,17 +352,22 @@ class BackfillApp(client.Application):
                                   f'{wid.locationCode()}.{wid.channelCode()}')
                         ts_ms  = _sc_time_to_ms(wfq.start())
                         param  = _norm_param(wfq.parameter())
+                        if param is None:
+                            skipped += 1
+                            it.next()
+                            continue
                         value  = wfq.value()
                         buf.append((stream, ts_ms, param, value))
                         count += 1
-                        if len(buf) >= 2000:
+                        if len(buf) >= 500:
                             local_db.executemany(
                                 'INSERT INTO qc_raw (stream, time_ms, parameter, value)'
                                 ' VALUES (?,?,?,?)',
                                 buf)
                             local_db.commit()
                             buf.clear()
-                            print(f'[backfill]   {count} rows...', end='\r', flush=True)
+                            print(f'[backfill]   {count} rows inserted, {skipped} skipped…',
+                                  end='\r', flush=True)
                     it.next()
 
             except Exception:
