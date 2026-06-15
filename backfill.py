@@ -374,6 +374,14 @@ class BackfillApp(client.Application):
         return True
 
     def run(self):
+        # Backup before touching anything
+        db_path = Path(self._db_path)
+        if db_path.exists():
+            backup_path = db_path.with_suffix('.db.bak')
+            import shutil
+            shutil.copy2(db_path, backup_path)
+            print(f'[backfill] Backup: {backup_path}')
+
         local_db = _open_db(self._db_path)
         print(f'[backfill] DB:     {self._db_path}')
         print(f'[backfill] Output: {self._output_dir}')

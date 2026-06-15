@@ -446,6 +446,17 @@ def _start_api(db_path, port):
 
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
+def _backup_db(db_path):
+    """Copy qc.db to qc.db.bak once per day as a simple safety net."""
+    import shutil
+    src = Path(db_path)
+    if src.exists():
+        try:
+            shutil.copy2(src, src.with_suffix('.db.bak'))
+        except Exception:
+            pass
+
+
 def _rollup_hourly(db, raw_retention_h):
     """
     Aggregate raw rows older than raw_retention_h into qc_hourly, then prune them.
@@ -511,6 +522,7 @@ class QCBackend(client.Application):
         self._last_rollup   = 0
         self._last_3d       = 0
         self._last_7d       = 0
+        self._last_backup   = 0
         self._msg_count     = 0
         self._seen_streams  = set()
 
@@ -567,6 +579,10 @@ class QCBackend(client.Application):
                 _write_7d(self._db, self._output_dir)
                 _write_30d(self._db, self._output_dir)
                 self._last_7d = now
+
+            if now - self._last_backup >= 86400:
+                _backup_db(self._db_path)
+                self._last_backup = now
 
         except Exception:
             traceback.print_exc()
