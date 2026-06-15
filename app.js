@@ -1249,7 +1249,7 @@ function initEvents() {
   initPicker(document.querySelector('#chart-panel   .tpick'), () => { if (S.detailStream) loadChartData(); });
   initPicker(document.querySelector('#view-history  .tpick'), () => { /* load triggered by Load btn */ });
   initPicker(document.querySelector('#view-overlay  .tpick'), () => { if (S.view === 'overlay') loadOverlay(); });
-  initPicker(document.querySelector('#view-heatmap  .tpick'), () => { /* load triggered by Load btn */ });
+  initPicker(document.querySelector('#view-heatmap  .tpick'), () => { if (S.view === 'heatmap') loadHeatmap(); });
 
   // Watchlist-only toggle
   document.getElementById('watchlist-only-btn').addEventListener('click', () => {
@@ -1272,7 +1272,8 @@ function initEvents() {
     const wrap = document.getElementById('overlay-chart-wrap');
     if (wrap.classList.contains('js-plotly-plot')) Plotly.relayout(wrap, { showlegend: show });
   });
-  // Heatmap view
+  // Heatmap view — param change or Load btn triggers reload
+  document.getElementById('hm-param').addEventListener('change', () => { if (S.view === 'heatmap') loadHeatmap(); });
   document.getElementById('hm-load-btn').addEventListener('click', loadHeatmap);
 
   // Events view
