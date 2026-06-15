@@ -128,6 +128,7 @@ def _open_db(path):
             count     INTEGER NOT NULL,
             PRIMARY KEY (stream, hour_ms, parameter)
         )''')
+    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_unique ON qc_raw(stream, time_ms, parameter)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_raw ON qc_raw(stream, parameter, time_ms DESC)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_raw_time ON qc_raw(time_ms)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_hourly ON qc_hourly(stream, parameter, hour_ms DESC)')
@@ -229,8 +230,6 @@ def _import_from_sqlite(source_path, dest_db, days):
     cutoff_ms = int(time.time() * 1000) - days * 86400 * 1000
     src = sqlite3.connect(source_path)
 
-    # Raw rows — delete then re-insert to avoid duplicates
-    dest_db.execute('DELETE FROM qc_raw WHERE time_ms >= ?', (cutoff_ms,))
     rows = src.execute(
         'SELECT stream, time_ms, parameter, value FROM qc_raw WHERE time_ms >= ?',
         (cutoff_ms,)
@@ -238,7 +237,7 @@ def _import_from_sqlite(source_path, dest_db, days):
     print(f'[backfill] {len(rows)} raw rows from {source_path}')
     if rows:
         dest_db.executemany(
-            'INSERT INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
+            'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
             rows
         )
 
@@ -285,8 +284,11 @@ def _import_from_csv(csv_path, dest_db):
     buf   = []
     count = 0
     skip  = 0
+    with open(csv_path, newline='', encoding='utf-8') as probe:
+        first = probe.readline()
+    delim = '\t' if '\t' in first else ','
     with open(csv_path, newline='', encoding='utf-8') as fh:
-        for row in csv.reader(fh):
+        for row in csv.reader(fh, delimiter=delim):
             if len(row) < 7:
                 skip += 1
                 continue
@@ -404,10 +406,6 @@ class BackfillApp(client.Application):
             sc_start = core.Time(cutoff_ms // 1000, (cutoff_ms % 1000) * 1000)
             sc_end   = core.Time.GMT()
 
-            # Clear existing raw rows in the import window (prevent duplicates)
-            local_db.execute('DELETE FROM qc_raw WHERE time_ms >= ?', (cutoff_ms,))
-            local_db.commit()
-
             buf     = []
             count   = 0
             skipped = 0
@@ -441,7 +439,7 @@ class BackfillApp(client.Application):
                             count += 1
                             if len(buf) >= 500:
                                 local_db.executemany(
-                                    'INSERT INTO qc_raw (stream, time_ms, parameter, value)'
+                                    'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value)'
                                     ' VALUES (?,?,?,?)',
                                     buf)
                                 local_db.commit()
@@ -452,7 +450,7 @@ class BackfillApp(client.Application):
                     # Flush remainder for this day
                     if buf:
                         local_db.executemany(
-                            'INSERT INTO qc_raw (stream, time_ms, parameter, value)'
+                            'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value)'
                             ' VALUES (?,?,?,?)',
                             buf)
                         local_db.commit()
@@ -468,7 +466,7 @@ class BackfillApp(client.Application):
 
             if buf:
                 local_db.executemany(
-                    'INSERT INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
+                    'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
                     buf)
                 local_db.commit()
 
