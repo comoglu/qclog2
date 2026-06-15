@@ -278,7 +278,7 @@ class BackfillApp(client.Application):
     def createCommandLineDescription(self):
         self.commandline().addGroup('Backfill')
         self.commandline().addIntOption(
-            'Backfill', 'days,d',
+            'Backfill', 'days',
             'Number of days of history to import (default: 7)')
         self.commandline().addStringOption(
             'Backfill', 'source-db',
