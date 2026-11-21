@@ -9,13 +9,19 @@ config.json
 *.db
 *.db-wal
 *.db-shm
-qc_current.json
-qc_24h.json
-qc_7d.json
-health.json
+*.db.bak
+*.db.bak.tmp
+# (anchored to the repo root so demo/*.json stays tracked)
+/qc_current.json
+/qc_24h.json
+/qc_3d.json
+/qc_7d.json
+/qc_30d.json
+/health.json
 
-# Temp files
+# Temp / editor backup files
 *.tmp
+*~
 
 # IDE
 .vscode/

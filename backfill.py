@@ -6,7 +6,7 @@ then regenerates all JSON files.  Designed to be run once after first deploy,
 or any time you want to re-import history.  The normal backend.py continues
 handling real-time data from the messaging system independently.
 
-Two modes:
+Three modes:
 
   A) From the SeisComP database (recommended — needs -d for the DB connection):
        python3 backfill.py -d localhost --days 7
@@ -17,12 +17,14 @@ Two modes:
        #   scp mainbox:/opt/seiscomp/var/run/qclog2/qc.db /tmp/qc_import.db
        #   seiscomp-python backfill.py --source-db /tmp/qc_import.db --days 30
 
+  C) From a MariaDB CSV export of WaveformQuality (see _import_from_csv):
+       seiscomp-python backfill.py --source-csv /tmp/wq.csv
+
 Config is read from config.json next to this file (same as backend.py).
 """
 
 from __future__ import print_function
 import csv
-import json
 import os
 import sqlite3
 import subprocess
@@ -58,170 +60,21 @@ _adopt_scmaster_env()
 from seiscomp import core, client, datamodel
 
 
-# ── Parameter normalisation (mirrors backend.py) ──────────────────────────────
+# Shared DB schema, rollup and JSON writers live in backend.py so the two
+# scripts can't drift apart (backend.py only starts its app under __main__).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from backend import (                                       # noqa: E402
+    _PARAM_MAP, PARAM_ORDER, _sc_time_to_ms, _load_config, _open_db,
+    _rollup_hourly, _write_current, _write_24h, _write_3d, _write_7d,
+    _write_30d, _backup_db,
+)
 
-_PARAM_MAP = {
-    'availability':      'availability',
-    'delay':             'delay',
-    'latency':           'latency',
-    'rms':               'rms',
-    'timing quality':    'timing_quality',
-    'offset':            'offset',
-    'gaps count':        'gaps_count',
-    'overlaps count':    'overlaps_count',
-    'spikes count':      'spikes_count',
-    'outage':            'outage',
-    'gaps interval':     'gaps_interval',
-    'overlaps interval': 'overlaps_interval',
-    'spikes interval':   'spikes_interval',
-}
-PARAM_ORDER = [
-    'availability', 'delay', 'latency', 'timing_quality',
-    'rms', 'offset', 'gaps_count', 'overlaps_count', 'spikes_count', 'outage',
-]
+# Backfill drops parameters the dashboard doesn't display (e.g. *_interval).
 KNOWN_PARAMS = set(PARAM_ORDER)
 
 def _norm_param(p):
     normalized = _PARAM_MAP.get(p.lower().strip(), p.lower().replace(' ', '_'))
     return normalized if normalized in KNOWN_PARAMS else None
-
-def _sc_time_to_ms(t):
-    return t.seconds() * 1000 + t.microseconds() // 1000
-
-def _load_config():
-    cfg_path = Path(__file__).parent / 'config.json'
-    try:
-        with open(cfg_path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _atomic_write(path, content):
-    tmp = str(path) + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(content, f, separators=(',', ':'))
-    os.replace(tmp, path)
-
-
-# ── SQLite DB setup (mirrors backend.py) ──────────────────────────────────────
-
-def _open_db(path):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, check_same_thread=False, timeout=60)
-    db.execute('PRAGMA journal_mode=WAL')
-    db.execute('PRAGMA synchronous=NORMAL')
-    db.execute('''
-        CREATE TABLE IF NOT EXISTS qc_raw (
-            stream    TEXT    NOT NULL,
-            time_ms   INTEGER NOT NULL,
-            parameter TEXT    NOT NULL,
-            value     REAL    NOT NULL
-        )''')
-    db.execute('''
-        CREATE TABLE IF NOT EXISTS qc_hourly (
-            stream    TEXT    NOT NULL,
-            hour_ms   INTEGER NOT NULL,
-            parameter TEXT    NOT NULL,
-            avg       REAL    NOT NULL,
-            min       REAL    NOT NULL,
-            max       REAL    NOT NULL,
-            count     INTEGER NOT NULL,
-            PRIMARY KEY (stream, hour_ms, parameter)
-        )''')
-    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_unique ON qc_raw(stream, time_ms, parameter)')
-    db.execute('CREATE INDEX IF NOT EXISTS idx_raw ON qc_raw(stream, parameter, time_ms DESC)')
-    db.execute('CREATE INDEX IF NOT EXISTS idx_raw_time ON qc_raw(time_ms)')
-    db.execute('CREATE INDEX IF NOT EXISTS idx_hourly ON qc_hourly(stream, parameter, hour_ms DESC)')
-    db.commit()
-    return db
-
-
-# ── JSON generation (mirrors backend.py) ─────────────────────────────────────
-
-def _rollup_hourly(db, raw_retention_h):
-    now_ms  = int(time.time() * 1000)
-    cutoff  = now_ms - raw_retention_h * 3600 * 1000
-    hour_ms = 3600 * 1000
-    old_rows = db.execute('''
-        SELECT stream, (time_ms/?) * ? AS hour, parameter,
-               AVG(value), MIN(value), MAX(value), COUNT(*)
-        FROM qc_raw WHERE time_ms < ?
-        GROUP BY stream, parameter, hour
-    ''', (hour_ms, hour_ms, cutoff)).fetchall()
-    if old_rows:
-        db.executemany('''
-            INSERT INTO qc_hourly (stream, hour_ms, parameter, avg, min, max, count)
-            VALUES (?,?,?,?,?,?,?)
-            ON CONFLICT(stream, hour_ms, parameter) DO UPDATE SET
-                avg   = (avg*count + excluded.avg*excluded.count) / (count + excluded.count),
-                min   = MIN(min, excluded.min),
-                max   = MAX(max, excluded.max),
-                count = count + excluded.count
-        ''', old_rows)
-        db.execute('DELETE FROM qc_raw WHERE time_ms < ?', (cutoff,))
-        db.commit()
-
-def _write_current(db, output_dir):
-    now_ms  = int(time.time() * 1000)
-    cutoff  = now_ms - 24 * 3600 * 1000
-    rows = db.execute('''
-        SELECT stream, parameter, value, time_ms FROM qc_raw
-        WHERE time_ms >= ? AND time_ms = (
-            SELECT MAX(r2.time_ms) FROM qc_raw r2
-            WHERE r2.stream=qc_raw.stream AND r2.parameter=qc_raw.parameter
-              AND r2.time_ms >= ?
-        ) ORDER BY stream, parameter
-    ''', (cutoff, cutoff)).fetchall()
-    streams = {}
-    for stream, param, value, ts in rows:
-        if stream not in streams: streams[stream] = {}
-        streams[stream][param] = {'v': round(value, 4), 't': ts}
-    spark_rows = db.execute('''
-        SELECT stream, parameter, hour_ms, avg FROM qc_hourly
-        WHERE hour_ms >= ? ORDER BY stream, parameter, hour_ms
-    ''', (cutoff,)).fetchall()
-    sparks = {}
-    for stream, param, hour_ms, avg in spark_rows:
-        if stream not in sparks: sparks[stream] = {}
-        if param not in sparks[stream]: sparks[stream][param] = []
-        sparks[stream][param].append([hour_ms, round(avg, 4)])
-    for stream, params in sparks.items():
-        if stream not in streams: streams[stream] = {}
-        for param, points in params.items():
-            if param in streams[stream]: streams[stream][param]['spark'] = points
-            else: streams[stream][param] = {'v': None, 't': None, 'spark': points}
-    _atomic_write(Path(output_dir) / 'qc_current.json',
-                  {'generated': now_ms, 'params': PARAM_ORDER, 'streams': streams})
-
-def _write_24h(db, output_dir):
-    now_ms  = int(time.time() * 1000)
-    cutoff  = now_ms - 24 * 3600 * 1000
-    bin_ms  = 10 * 60 * 1000
-    rows = db.execute('''
-        SELECT stream, parameter, (time_ms/?) * ? AS bin, AVG(value)
-        FROM qc_raw WHERE time_ms >= ?
-        GROUP BY stream, parameter, bin ORDER BY stream, parameter, bin
-    ''', (bin_ms, bin_ms, cutoff)).fetchall()
-    streams = {}
-    for stream, param, bin_val, avg in rows:
-        if stream not in streams: streams[stream] = {}
-        if param not in streams[stream]: streams[stream][param] = []
-        streams[stream][param].append([bin_val, round(avg, 4)])
-    _atomic_write(Path(output_dir) / 'qc_24h.json', {'generated': now_ms, 'streams': streams})
-
-def _write_7d(db, output_dir):
-    now_ms = int(time.time() * 1000)
-    cutoff = now_ms - 7 * 24 * 3600 * 1000
-    rows = db.execute('''
-        SELECT stream, parameter, hour_ms, avg FROM qc_hourly
-        WHERE hour_ms >= ? ORDER BY stream, parameter, hour_ms
-    ''', (cutoff,)).fetchall()
-    streams = {}
-    for stream, param, hour_ms, avg in rows:
-        if stream not in streams: streams[stream] = {}
-        if param not in streams[stream]: streams[stream][param] = []
-        streams[stream][param].append([hour_ms, round(avg, 4)])
-    _atomic_write(Path(output_dir) / 'qc_7d.json', {'generated': now_ms, 'streams': streams})
 
 
 # ── Mode B: import from another qclog2 SQLite DB ──────────────────────────────
@@ -335,7 +188,7 @@ class BackfillApp(client.Application):
         cfg = _load_config()
         self._db_path    = cfg.get('db_path',        str(Path(__file__).parent / 'qc.db'))
         self._output_dir = cfg.get('output_dir',     str(Path(__file__).parent))
-        self._raw_ret_h  = cfg.get('raw_retention_h', 25)
+        self._raw_ret_h  = cfg.get('raw_retention_h', 72)
         self._days       = 7
         self._source_db  = None
         self._source_csv = None
@@ -374,13 +227,8 @@ class BackfillApp(client.Application):
         return True
 
     def run(self):
-        # Backup before touching anything
-        db_path = Path(self._db_path)
-        if db_path.exists():
-            backup_path = db_path.with_suffix('.db.bak')
-            import shutil
-            shutil.copy2(db_path, backup_path)
-            print(f'[backfill] Backup: {backup_path}')
+        # Backup before touching anything (consistent even if backend is running)
+        _backup_db(self._db_path)
 
         local_db = _open_db(self._db_path)
         print(f'[backfill] DB:     {self._db_path}')
@@ -487,11 +335,14 @@ class BackfillApp(client.Application):
         print('[backfill] Writing JSON files...')
         _write_current(local_db, self._output_dir)
         _write_24h(local_db, self._output_dir)
+        _write_3d(local_db, self._output_dir)
         _write_7d(local_db, self._output_dir)
+        _write_30d(local_db, self._output_dir)
 
         print(f'[backfill] Done.')
         return True
 
 
-app = BackfillApp(len(sys.argv), sys.argv)
-sys.exit(app())
+if __name__ == '__main__':
+    app = BackfillApp(len(sys.argv), sys.argv)
+    sys.exit(app())

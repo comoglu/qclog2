@@ -70,6 +70,23 @@ def _load_config():
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
+def _ensure_unique_raw_index(db):
+    """Create the (stream, time_ms, parameter) unique index that INSERT OR IGNORE
+    relies on. Duplicates are removed first, but only when the index is missing,
+    so the full-table scan happens once per database, not on every start."""
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_raw_unique'"
+    ).fetchone()
+    if exists:
+        return
+    print('[qclog2] Creating unique index on qc_raw (one-time, removing duplicates)…',
+          flush=True)
+    db.execute('''DELETE FROM qc_raw WHERE rowid NOT IN (
+        SELECT MIN(rowid) FROM qc_raw GROUP BY stream, time_ms, parameter)''')
+    db.execute('CREATE UNIQUE INDEX idx_raw_unique ON qc_raw(stream, time_ms, parameter)')
+    db.commit()
+
+
 def _open_db(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, check_same_thread=False, timeout=30)
@@ -94,6 +111,7 @@ def _open_db(path):
             count     INTEGER NOT NULL,
             PRIMARY KEY (stream, hour_ms, parameter)
         )''')
+    _ensure_unique_raw_index(db)
     db.execute('CREATE INDEX IF NOT EXISTS idx_raw ON qc_raw(stream, parameter, time_ms DESC)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_raw_time ON qc_raw(time_ms)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_hourly ON qc_hourly(stream, parameter, hour_ms DESC)')
@@ -109,6 +127,33 @@ def _atomic_write(path, content):
     with open(tmp, 'w') as f:
         json.dump(content, f, separators=(',', ':'))
     os.replace(tmp, path)
+
+
+def _hourly_series(db, from_ms, to_ms, param=None):
+    """Hourly averages over [from_ms, to_ms] as (stream, parameter, hour_ms, avg).
+
+    qc_hourly only holds data older than raw_retention_h; anything newer is
+    still in qc_raw. Both are combined here, weighted by sample count, so an
+    hour split across the rollup boundary is averaged correctly.
+    """
+    p_sql  = ' AND parameter = ?' if param else ''
+    p_args = [param] if param else []
+    return db.execute(f'''
+        SELECT stream, parameter, hour, SUM(s) / SUM(n)
+        FROM (
+            SELECT stream, parameter, hour_ms AS hour, avg * count AS s, count AS n
+            FROM qc_hourly
+            WHERE hour_ms >= ? AND hour_ms <= ?{p_sql}
+            UNION ALL
+            SELECT stream, parameter, (time_ms / 3600000) * 3600000 AS hour,
+                   SUM(value) AS s, COUNT(*) AS n
+            FROM qc_raw
+            WHERE time_ms >= ? AND time_ms <= ?{p_sql}
+            GROUP BY stream, parameter, hour
+        )
+        GROUP BY stream, parameter, hour
+        ORDER BY stream, parameter, hour
+    ''', [from_ms, to_ms] + p_args + [from_ms, to_ms] + p_args).fetchall()
 
 
 def _write_current(db, output_dir):
@@ -139,14 +184,9 @@ def _write_current(db, output_dir):
             streams[stream] = {}
         streams[stream][param] = {'v': round(value, 4), 't': ts}
 
-    # Hourly sparklines from qc_hourly (last 24 hours)
+    # Hourly sparklines (last 24 hours, raw + rolled-up)
     hour_cutoff = now_ms - 24 * 3600 * 1000
-    spark_rows = db.execute('''
-        SELECT stream, parameter, hour_ms, avg
-        FROM qc_hourly
-        WHERE hour_ms >= ?
-        ORDER BY stream, parameter, hour_ms
-    ''', (hour_cutoff,)).fetchall()
+    spark_rows = _hourly_series(db, hour_cutoff, now_ms)
 
     sparks = {}
     for stream, param, hour_ms, avg in spark_rows:
@@ -208,17 +248,12 @@ def _write_24h(db, output_dir):
 
 def _write_7d(db, output_dir):
     """
-    qc_7d.json — last 7 days at hourly resolution from qc_hourly table.
+    qc_7d.json — last 7 days at hourly resolution (qc_hourly + recent qc_raw).
     """
     now_ms  = int(time.time() * 1000)
     cutoff  = now_ms - 7 * 24 * 3600 * 1000
 
-    rows = db.execute('''
-        SELECT stream, parameter, hour_ms, avg
-        FROM qc_hourly
-        WHERE hour_ms >= ?
-        ORDER BY stream, parameter, hour_ms
-    ''', (cutoff,)).fetchall()
+    rows = _hourly_series(db, cutoff, now_ms)
 
     streams = {}
     for stream, param, hour_ms, avg in rows:
@@ -295,16 +330,11 @@ def _write_3d(db, output_dir):
 
 
 def _write_30d(db, output_dir):
-    """qc_30d.json — last 30 days at hourly resolution from qc_hourly."""
+    """qc_30d.json — last 30 days at hourly resolution (qc_hourly + recent qc_raw)."""
     now_ms = int(time.time() * 1000)
     cutoff = now_ms - 30 * 24 * 3600 * 1000
 
-    rows = db.execute('''
-        SELECT stream, parameter, hour_ms, avg
-        FROM qc_hourly
-        WHERE hour_ms >= ?
-        ORDER BY stream, parameter, hour_ms
-    ''', (cutoff,)).fetchall()
+    rows = _hourly_series(db, cutoff, now_ms)
 
     streams = {}
     for stream, param, hour_ms, avg in rows:
@@ -382,26 +412,39 @@ class _APIHandler(BaseHTTPRequestHandler):
         else:
             bin_ms = 3_600_000       # 1 h
 
+        p_sql  = ' AND parameter = ?' if param else ''
+        p_args = [param] if param else []
+
         db = sqlite3.connect(self.db_path, check_same_thread=True)
         try:
             if span <= 48 * 3_600_000:
-                sql = ('SELECT stream, parameter, (time_ms/?) * ? AS bin, AVG(value) '
-                       'FROM qc_raw WHERE time_ms >= ? AND time_ms <= ?')
-                args: list = [bin_ms, bin_ms, from_ms, to_ms]
-                if param:
-                    sql += ' AND parameter = ?'
-                    args.append(param)
-                sql += ' GROUP BY stream, parameter, bin ORDER BY stream, parameter, bin'
-            else:
-                sql = ('SELECT stream, parameter, hour_ms AS bin, avg '
-                       'FROM qc_hourly WHERE hour_ms >= ? AND hour_ms <= ?')
-                args = [from_ms, to_ms]
-                if param:
-                    sql += ' AND parameter = ?'
-                    args.append(param)
-                sql += ' ORDER BY stream, parameter, hour_ms'
+                rows = db.execute(
+                    'SELECT stream, parameter, (time_ms/?) * ? AS bin, AVG(value) '
+                    'FROM qc_raw WHERE time_ms >= ? AND time_ms <= ?' + p_sql +
+                    ' GROUP BY stream, parameter, bin',
+                    [bin_ms, bin_ms, from_ms, to_ms] + p_args).fetchall()
 
-            rows = db.execute(sql, args).fetchall()
+                # Raw rows older than raw_retention_h have been rolled up into
+                # qc_hourly. Fill that part of the window from qc_hourly,
+                # repeating each hourly value across its sub-hour bins so the
+                # resolution looks uniform (same approach as _write_3d).
+                oldest_raw = db.execute('SELECT MIN(time_ms) FROM qc_raw').fetchone()[0]
+                fill_to = min(to_ms, oldest_raw) if oldest_raw is not None else to_ms
+                if fill_to > from_ms:
+                    hourly = db.execute(
+                        'SELECT stream, parameter, hour_ms, avg FROM qc_hourly '
+                        'WHERE hour_ms >= ? AND hour_ms < ?' + p_sql,
+                        [from_ms - 3_600_000, fill_to] + p_args).fetchall()
+                    per_hour = 3_600_000 // bin_ms
+                    rows += [
+                        (s, p, b, avg)
+                        for s, p, hour_ms, avg in hourly
+                        for b in (hour_ms + i * bin_ms for i in range(per_hour))
+                        if from_ms <= b < fill_to
+                    ]
+                rows.sort(key=lambda r: (r[0], r[1], r[2]))
+            else:
+                rows = _hourly_series(db, from_ms, to_ms, param)
         except Exception:
             traceback.print_exc()
             self.send_error(500, 'Query failed')
@@ -447,13 +490,33 @@ def _start_api(db_path, port):
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
 def _backup_db(db_path):
-    """Copy qc.db to qc.db.bak once per day as a simple safety net."""
-    import shutil
-    src = Path(db_path)
-    if src.exists():
+    """Write a consistent snapshot of qc.db to qc.db.bak.
+
+    Uses SQLite's online backup API, which is safe while the database is
+    being written (a plain file copy of a WAL-mode DB can be inconsistent
+    and misses the -wal file). The snapshot goes to a temp file first so an
+    interrupted backup never replaces the previous good one.
+    """
+    src_path = Path(db_path)
+    if not src_path.exists():
+        return
+    bak = src_path.with_suffix('.db.bak')
+    tmp = src_path.with_suffix('.db.bak.tmp')
+    try:
+        src = sqlite3.connect(str(src_path), timeout=60)
+        dst = sqlite3.connect(str(tmp))
         try:
-            shutil.copy2(src, src.with_suffix('.db.bak'))
-        except Exception:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        os.replace(tmp, bak)
+        print(f'[qclog2] Backup written: {bak}', flush=True)
+    except Exception:
+        traceback.print_exc()
+        try:
+            tmp.unlink()
+        except OSError:
             pass
 
 
@@ -591,7 +654,7 @@ class QCBackend(client.Application):
         if not self._insert_buf:
             return
         self._db.executemany(
-            'INSERT INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
+            'INSERT OR IGNORE INTO qc_raw (stream, time_ms, parameter, value) VALUES (?,?,?,?)',
             self._insert_buf
         )
         self._db.commit()
@@ -608,5 +671,6 @@ class QCBackend(client.Application):
             traceback.print_exc()
 
 
-app = QCBackend(len(sys.argv), sys.argv)
-sys.exit(app())
+if __name__ == '__main__':
+    app = QCBackend(len(sys.argv), sys.argv)
+    sys.exit(app())
