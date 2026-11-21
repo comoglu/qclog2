@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>qclog2 — SeisComP QC Monitoring Dashboard</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/night.min.css">
+  <style>
+    :root { --ac: #00a8e8; --am: #e2b96b; --bg: #0d1b2a; }
+    .reveal { font-family: 'Helvetica Neue', Arial, sans-serif; }
+    .reveal h1, .reveal h2, .reveal h3 { color: var(--ac); text-transform: none; letter-spacing: -0.02em; }
+    .reveal h1 { font-size: 2.4em; }
+    .reveal h2 { font-size: 1.5em; border-bottom: 2px solid var(--ac); padding-bottom: 0.2em; margin-bottom: 0.5em; }
+    .reveal pre  { box-shadow: 0 4px 20px rgba(0,0,0,.5); border-radius: 8px; font-size: .7em; }
+    .reveal code { background: #1a2a3a; border-radius: 4px; padding: .1em .3em; font-size: .88em; }
+    .reveal ul li { margin-bottom: .35em; }
+    .reveal a { color: var(--ac); }
+    .ac  { color: var(--ac); }
+    .am  { color: var(--am); }
+    .dim { color: #888; }
+    .tag { display:inline-block; background:var(--ac); color:#0d1b2a; border-radius:4px; padding:.1em .5em; font-size:.78em; font-weight:bold; margin:.15em; }
+    .tag.am { background: var(--am); }
+    .two { display:grid; grid-template-columns:1fr 1fr; gap:1em; }
+    .cards { display:grid; grid-template-columns:1fr 1fr; gap:.7em; font-size:.85em; }
+    .card  { background:#1a2a3a; border-left:3px solid var(--ac); border-radius:4px; padding:.6em .9em; text-align:left; }
+    .card h4 { margin:0 0 .3em; color:var(--ac); font-size:1em; }
+    .card p  { margin:0; color:#ccc; font-size:.9em; }
+    .pipe { display:flex; align-items:center; justify-content:center; gap:.4em; flex-wrap:wrap; font-size:.82em; }
+    .box  { background:#1a2a3a; border:1.5px solid var(--ac); border-radius:6px; padding:.4em .8em; text-align:center; min-width:90px; }
+    .box.am { border-color:var(--am); }
+    .arr  { color:var(--ac); font-size:1.3em; }
+    .rtable { width:100%; border-collapse:collapse; font-size:.72em; }
+    .rtable th { background:var(--ac); color:#0d1b2a; padding:.35em .7em; text-align:left; }
+    .rtable td { padding:.35em .7em; border-bottom:1px solid #2a3a4a; text-align:left; vertical-align:top; }
+    .logobar { margin-top:2.2em; font-size:.72em; color:#777; border-top:1px solid #222; padding-top:.7em; }
+    /* Screenshot slides: bullets left, image right */
+    .shot { display:grid; grid-template-columns: 0.8fr 1.6fr; gap: 1em; align-items: start; }
+    .shot ul { font-size: .72em; margin: 0; }
+    .shot img, .shot-full img {
+      margin: 0 !important; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.6);
+      border: 1px solid #2a3a4a; max-width: 100%; background: #fff;
+    }
+    .shot-full img { max-height: 470px; }
+    .cap { font-size:.55em; color:#888; margin-top:.3em; }
+    .note { font-size:.62em; color:#aaa; background:#1a2a3a; border-left:3px solid var(--am); padding:.5em .8em; border-radius:4px; text-align:left; }
+  </style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ─── 1. TITLE ─── -->
+<section data-background="#0d1b2a">
+  <h1>qclog2</h1>
+  <p style="font-size:1.25em;color:var(--am);margin:.2em 0 .9em;">Real-time QC Monitoring Dashboard for SeisComP</p>
+  <p style="color:#ccc;line-height:1.7em;font-size:.85em;">
+    Source: <a href="https://github.com/comoglu/qclog2">github.com/comoglu/qclog2</a><br>
+    Live demo (synthetic data): <a href="https://comoglu.github.io/qclog2/">comoglu.github.io/qclog2</a>
+  </p>
+  <p style="color:#888;font-size:.6em;margin-top:1.2em;">
+    First presented at the SeisComP Regional User Group Meeting, Geoscience Australia, Canberra — 17 June 2026
+  </p>
+  <div class="logobar">Mustafa Comoglu</div>
+  <aside class="notes">qclog2 is a lightweight web dashboard for SeisComP QC data. Everything shown in the screenshots can be tried in the public demo, which runs on synthetic data.</aside>
+</section>
+
+<!-- ─── 2. MOTIVATION ─── -->
+<section>
+  <h2>Motivation</h2>
+  <ul>
+    <li><code>scqc</code> publishes QC metrics continuously to the messaging bus:<br>
+      <span style="margin-top:.4em;display:block;">
+        <span class="tag">delay</span><span class="tag">latency</span><span class="tag">availability</span><span class="tag">timing quality</span><span class="tag">rms</span><span class="tag">offset</span><span class="tag">gaps</span><span class="tag">overlaps</span><span class="tag">spikes</span>
+      </span>
+    </li>
+    <li style="margin-top:.6em;">Inspecting them normally means running a SeisComP GUI client (<code>scqcv</code>)</li>
+    <li>We wanted an <em>always-on, browser-based</em> view that anyone on the team can open</li>
+    <li>Focus: a quick network-health overview plus history — not a full analyst workstation</li>
+  </ul>
+  <aside class="notes">scqc already runs in most SeisComP deployments. We wanted something you could open in any browser, on a wall screen or a phone, without installing a SeisComP client.</aside>
+</section>
+
+<!-- ─── 3. WHAT IS IT ─── -->
+<section>
+  <h2>What is qclog2?</h2>
+  <div class="cards">
+    <div class="card">
+      <h4>Python backend</h4>
+      <p>A standard SeisComP application subscribed to the <code>QC</code> group; buffers inserts and writes periodic JSON snapshots</p>
+    </div>
+    <div class="card">
+      <h4>Static frontend</h4>
+      <p>Plain HTML + JavaScript — no framework, no build step, served by any web server</p>
+    </div>
+    <div class="card">
+      <h4>SQLite storage</h4>
+      <p>No extra database server. Raw values (72 h by default) + hourly rollup for 30 days</p>
+    </div>
+    <div class="card">
+      <h4>Minimal dependencies</h4>
+      <p>Runs next to an existing SeisComP installation; chart and map libraries bundled locally</p>
+    </div>
+  </div>
+  <aside class="notes">It's designed to be a drop-in. The backend is a normal SeisComP Python application that subscribes to the QC messaging group.</aside>
+</section>
+
+<!-- ─── 4. ARCHITECTURE ─── -->
+<section>
+  <h2>Architecture</h2>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:.5em;font-size:.82em;">
+    <div class="pipe">
+      <div class="box"><b>scqc</b><br><small>SeisComP</small></div>
+      <span class="arr">→</span>
+      <div class="box"><b>scmaster</b><br><small>QC group</small></div>
+      <span class="arr">→</span>
+      <div class="box am"><b>backend.py</b><br><small>handleMessage()</small></div>
+      <span class="arr">→</span>
+      <div class="box am"><b>SQLite</b><br><small>qc_raw / qc_hourly</small></div>
+    </div>
+    <div class="arr" style="font-size:1.4em;">↓ every 60 s (configurable) / hourly</div>
+    <div class="pipe">
+      <div class="box" style="min-width:120px;"><code>qc_current.json</code><br><small>latest values + 24 h sparklines</small></div>
+      <div class="box" style="min-width:120px;"><code>qc_24h / qc_3d.json</code><br><small>10-min bins</small></div>
+      <div class="box" style="min-width:120px;"><code>qc_7d / qc_30d.json</code><br><small>hourly averages</small></div>
+      <div class="box" style="min-width:120px;"><code>/api/qc</code><br><small>custom time ranges</small></div>
+    </div>
+    <div class="arr" style="font-size:1.4em;">↓</div>
+    <div class="box am" style="min-width:220px;font-size:1.05em;"><b>Browser</b> — polls the JSON files</div>
+  </div>
+  <aside class="notes">The backend writes static JSON files to disk and the frontend just fetches them, so normal viewing puts no query load on the backend. A small HTTP API answers custom date-range queries.</aside>
+</section>
+
+<!-- ─── 5. SCQC PARAMETERS ─── -->
+<section>
+  <h2>Reading scqc parameters</h2>
+  <table class="rtable">
+    <tr><th>Parameter</th><th>What scqc measures</th></tr>
+    <tr><td><b>delay</b></td><td>Time from the last sample of a record to when the record arrives</td></tr>
+    <tr><td><b>latency</b></td><td>Time between consecutive record arrivals</td></tr>
+    <tr><td><b>availability</b></td><td>Percentage of the report window covered by data</td></tr>
+    <tr><td><b>timing quality</b></td><td>From the miniSEED header (only if the datalogger writes it)</td></tr>
+    <tr><td><b>rms / offset</b></td><td>RMS amplitude and mean (DC offset) of the waveform, in counts</td></tr>
+    <tr><td><b>gaps / overlaps / spikes</b></td><td>Counts within the report window (plus interval statistics)</td></tr>
+  </table>
+  <p class="note" style="margin-top:.7em;">
+    When a stream stops, scqc keeps reporting <b>latency</b>, <b>delay</b> (both keep growing) and <b>availability</b> (drops to 0)
+    via its timeout handling, while waveform-based parameters simply stop arriving. In qclog2 an outage therefore shows up
+    as red latency/availability with greyed-out (stale) waveform values.
+  </p>
+  <aside class="notes">Definitions are taken from the scqc processor source. The default report interval is 60 seconds per parameter.</aside>
+</section>
+
+<!-- ─── 6. SCQC COST ─── -->
+<section>
+  <h2>scqc load scales with streams</h2>
+  <ul style="font-size:.78em;">
+    <li>scqc runs <b>one instance of every plugin per stream</b> — 10 plugins by default, each processing every record and keeping its own buffer</li>
+    <li>With <code>report.interval = 60</code>, each stream sends ~12 values per minute to the <code>QC</code> group — and every subscriber receives them</li>
+    <li>If <code>archive.interval</code> is enabled, the same values are also written to the SeisComP database (<code>WaveformQuality</code> table grows quickly)</li>
+  </ul>
+  <p class="note" style="margin-top:.6em;font-size:.68em;">
+    <b>Recommendation:</b> monitor the <b>vertical component only</b> (the scqc default:
+    <code>use3Components = false</code>). Enabling three components — or all channels — roughly triples
+    scqc CPU/memory, the message rate through scmaster, and storage in both SeisComP and qclog2.
+    Example: 900 streams × ~12 values/min ≈ 15 million values per day.
+  </p>
+  <aside class="notes">This matters most for large networks. The vertical channel already tells you whether a station is alive, timely and continuous; horizontals mostly duplicate that.</aside>
+</section>
+
+<!-- ─── 7. SETUP ─── -->
+<section>
+  <h2>Installation &amp; Setup</h2>
+  <div class="two" style="font-size:.82em;">
+    <div>
+      <p class="ac" style="margin:.1em 0 .3em;"><strong>Backend</strong></p>
+      <pre><code class="language-bash"># Development
+seiscomp-python backend.py -H localhost
+
+# Production: systemd unit included
+sudo systemctl enable --now qclog2</code></pre>
+      <pre><code class="language-json">// config.json
+{
+  "db_path": "/opt/seiscomp/var/run/qclog2/qc.db",
+  "output_dir": "/opt/seiscomp/var/run/qclog2",
+  "json_interval": 60,
+  "raw_retention_h": 72
+}</code></pre>
+    </div>
+    <div>
+      <p class="ac" style="margin:.1em 0 .3em;"><strong>Frontend</strong></p>
+      <pre><code class="language-bash"># Quick start
+python3 -m http.server 8080
+
+# Production: nginx serves the files and
+# proxies /api/ to the backend (port 8765)</code></pre>
+      <p style="color:#aaa;font-size:.88em;margin-top:.6em;line-height:1.8em;">
+        ✅ No npm / webpack / containers<br>
+        ✅ systemd service for the backend<br>
+        ✅ Station coordinates from FDSNWS<br>
+        ✅ <code>backfill.py</code> imports history from the SeisComP DB
+      </p>
+    </div>
+  </div>
+  <aside class="notes">Full instructions, including the nginx configuration, are in the README on GitHub.</aside>
+</section>
+
+<!-- ─── 8. TABLE VIEW ─── -->
+<section>
+  <h2>Table View</h2>
+  <div class="shot">
+    <ul>
+      <li>One row per stream, one column per QC parameter</li>
+      <li>Cells coloured against configurable thresholds</li>
+      <li>Inline 24 h sparkline in every cell</li>
+      <li>Values older than 30 min are greyed out as stale</li>
+      <li>Sort by any column; search; filter by network or status</li>
+      <li>Click a cell → side-panel chart with its own time picker</li>
+    </ul>
+    <div>
+      <img src="docs/screenshots/panel.png" alt="Table view with side-panel chart">
+      <div class="cap">Synthetic demo data · XA.MIRN is down (latency climbing, availability 0 %), XB.SALT has a slow link</div>
+    </div>
+  </div>
+  <aside class="notes">The table refreshes every 60 seconds by default (30 s and 2 min are selectable). Sorting by latency quickly brings the worst streams to the top.</aside>
+</section>
+
+<!-- ─── 9. GRID + MAP ─── -->
+<section>
+  <h2>Grid &amp; Map Views</h2>
+  <div class="two" style="align-items:start;">
+    <div class="shot-full">
+      <img src="docs/screenshots/grid.png" alt="Grid view">
+      <p style="font-size:.6em;color:#ccc;text-align:left;margin:.4em 0 0;">
+        <b class="ac">Grid</b> — one card per station showing its worst status and the value that caused it.
+        Click a card to jump to the Table filtered to that station.
+      </p>
+    </div>
+    <div class="shot-full">
+      <img src="docs/screenshots/map.png" alt="Map view">
+      <p style="font-size:.6em;color:#ccc;text-align:left;margin:.4em 0 0;">
+        <b class="ac">Map</b> — Leaflet markers coloured by station status, clustered when zoomed out.
+        Popup shows the station code, status and number of streams. Coordinates come from FDSNWS.
+      </p>
+    </div>
+  </div>
+  <aside class="notes">The grid is the morning-check view: red and amber cards stand out immediately. The map shows whether a problem is isolated or regional — for example a shared telemetry path.</aside>
+</section>
+
+<!-- ─── 10. HISTORY ─── -->
+<section>
+  <h2>History: Per-stream Charts</h2>
+  <div class="shot">
+    <ul>
+      <li>Presets 1 h → 30 d, or a custom UTC date range</li>
+      <li>10-min averages up to 3 days; hourly averages beyond</li>
+      <li>Warn / alert zones shaded behind the line</li>
+      <li><b>Period status</b> bar: % of time OK / warn / alert / no data</li>
+      <li>CSV export: one stream, all streams, or a per-stream period summary</li>
+    </ul>
+    <div>
+      <img src="docs/screenshots/history.png" alt="History view">
+      <div class="cap">Timing quality of a station with a degrading GPS, last 7 days</div>
+    </div>
+  </div>
+  <aside class="notes">The period summary export gives a per-stream availability-style report for any time range, which is handy for monthly network reporting.</aside>
+</section>
+
+<!-- ─── 11. OVERLAY ─── -->
+<section>
+  <h2>Overlay: Multi-stream Comparison</h2>
+  <div class="shot">
+    <ul>
+      <li>All streams on one interactive <b>Plotly</b> chart, coloured by network</li>
+      <li>Filter: <code>AU.ARMA, BHZ</code> to include, <code>!MIRN</code> to exclude</li>
+      <li>Y-axis rescales to the visible streams</li>
+      <li>Legend: click to hide, double-click to isolate</li>
+      <li>All times in UTC</li>
+    </ul>
+    <div>
+      <img src="docs/screenshots/overlay.png" alt="Overlay view">
+      <div class="cap">Delay, 7 days, two downed stations excluded: a regional telemetry incident on network XC stands out</div>
+    </div>
+  </div>
+  <aside class="notes">Excluding the stations with outages lets the y-axis rescale, and a network-wide event becomes obvious.</aside>
+</section>
+
+<!-- ─── 12. HEATMAP ─── -->
+<section>
+  <h2>Heatmap View</h2>
+  <div class="shot">
+    <ul>
+      <li>Rows: streams · Columns: time bins</li>
+      <li>Cell colour = status against thresholds</li>
+      <li>10-min bins up to 3 d, hourly for 7 d / 30 d</li>
+      <li>The fastest way to see <em>when</em> a problem started and how far it spread</li>
+    </ul>
+    <div class="shot-full">
+      <img src="docs/screenshots/heatmap.png" alt="Heatmap view" style="max-height:480px;">
+    </div>
+  </div>
+  <aside class="notes">In one picture: an ongoing outage, an 8-hour outage two days ago, a slow link that started recently, and a short regional incident five days ago.</aside>
+</section>
+
+<!-- ─── 13. ALERTING ─── -->
+<section>
+  <h2>Thresholds &amp; Events</h2>
+  <div class="shot">
+    <ul>
+      <li>Per-parameter warn &amp; alert levels, set in the UI and saved <b>per browser</b> (localStorage)</li>
+      <li>Watchlist to star and filter specific streams</li>
+      <li><b>Events</b> tab: each change of a stream's overall status (ok / warn / alert / no data), with duration once resolved</li>
+      <li>Optional desktop notifications on alert and recovery</li>
+      <li>Events are detected by the browser while the dashboard is open — not a server-side alerting system</li>
+    </ul>
+    <div>
+      <img src="docs/screenshots/events.png" alt="Events view">
+    </div>
+  </div>
+  <aside class="notes">Events give a timeline during an incident: which streams went to alert and when they recovered. For guaranteed paging you would still use a server-side alerting tool.</aside>
+</section>
+
+<!-- ─── 14. DATA RETENTION ─── -->
+<section>
+  <h2>Data Retention</h2>
+  <table class="rtable" style="font-size:.8em;">
+    <tr><th>Tier</th><th>Resolution</th><th>Retention</th><th>Used for</th></tr>
+    <tr>
+      <td><code>qc_raw</code></td><td>Every value from scqc</td><td>72 h (configurable)</td>
+      <td>Latest values, 24 h &amp; 3 d views</td>
+    </tr>
+    <tr>
+      <td><code>qc_hourly</code></td><td>Hourly avg / min / max</td><td>30 days</td>
+      <td>7 d &amp; 30 d views, long custom ranges</td>
+    </tr>
+  </table>
+  <div style="margin-top:.9em;font-size:.8em;color:#aaa;">
+    <p style="margin:.2em 0;">JSON written every 60 s (current, 24 h, 3 d) and hourly (7 d, 30 d):</p>
+    <span class="tag" style="font-size:.82em;">qc_current.json</span>
+    <span class="tag" style="font-size:.82em;">qc_24h.json</span>
+    <span class="tag" style="font-size:.82em;">qc_3d.json</span>
+    <span class="tag" style="font-size:.82em;">qc_7d.json</span>
+    <span class="tag" style="font-size:.82em;">qc_30d.json</span>
+  </div>
+  <p style="color:#aaa;font-size:.8em;margin-top:.7em;">
+    History can be <strong>backfilled</strong> from the SeisComP database, another qclog2 instance, or a CSV export.
+    A consistent daily backup of the SQLite file is made automatically.
+  </p>
+  <aside class="notes">The two tiers keep recent queries fast while keeping 30 days of history compact.</aside>
+</section>
+
+<!-- ─── 15. SUMMARY ─── -->
+<section>
+  <h2>Summary</h2>
+  <div class="cards">
+    <div class="card">
+      <h4>Network views</h4>
+      <p>Table, Grid, Map and Heatmap — each suited to a different monitoring task</p>
+    </div>
+    <div class="card">
+      <h4>History: 1 h → 30 d</h4>
+      <p>Per-stream charts, period summaries and CSV export; Overlay for network-wide comparison</p>
+    </div>
+    <div class="card">
+      <h4>Thresholds &amp; events</h4>
+      <p>Configurable levels, status-change timeline, desktop notifications</p>
+    </div>
+    <div class="card">
+      <h4>Lightweight</h4>
+      <p>Python + SQLite backend, plain HTML frontend — runs next to any SeisComP system</p>
+    </div>
+  </div>
+  <p style="color:#aaa;font-size:.82em;margin-top:1em;">
+    No extra database server · No SeisComP client needed to view · Any modern browser
+  </p>
+  <aside class="notes">The question it answers: is my network healthy right now, and was it healthy yesterday — without opening scqcv or querying a database.</aside>
+</section>
+
+<!-- ─── 16. THANK YOU ─── -->
+<section data-background="#0d1b2a">
+  <h1 style="font-size:2.6em;">Thank you</h1>
+  <p style="color:var(--am);font-size:1.15em;margin:.3em 0 1.2em;">Questions &amp; Discussion</p>
+  <p style="color:#ccc;font-size:.85em;line-height:1.9em;">
+    Source: <a href="https://github.com/comoglu/qclog2">github.com/comoglu/qclog2</a><br>
+    Demo: <a href="https://comoglu.github.io/qclog2/">comoglu.github.io/qclog2</a><br>
+    <span style="color:#777;font-size:.9em;">Mustafa Comoglu</span>
+  </p>
+  <aside class="notes">Live demo.</aside>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/plugin/notes/notes.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/plugin/highlight/highlight.min.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    backgroundTransition: 'fade',
+    width: 1280,
+    height: 720,
+    margin: 0.05,
+    plugins: [RevealNotes, RevealHighlight],
+  });
+</script>
+</body>
+</html>

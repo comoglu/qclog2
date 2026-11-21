@@ -2,6 +2,16 @@
 
 A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP's `QC` messaging group via `scmaster`, stores measurements in SQLite, and periodically writes JSON files that the frontend polls. No build step — the frontend is plain HTML/CSS/JS served statically.
 
+**Live demo (synthetic data):** <https://comoglu.github.io/qclog2/> · **Slides:** [QCLog2_presentation.html](https://comoglu.github.io/qclog2/QCLog2_presentation.html)
+
+![Table view with side-panel chart](docs/screenshots/panel.png)
+
+| Heatmap | Overlay |
+|---|---|
+| ![Heatmap](docs/screenshots/heatmap.png) | ![Overlay](docs/screenshots/overlay.png) |
+| **Grid** | **Map** |
+| ![Grid](docs/screenshots/grid.png) | ![Map](docs/screenshots/map.png) |
+
 ---
 
 ## Features
@@ -9,7 +19,7 @@ A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP
 - **Table view** — colour-coded grid of the latest value for every stream × parameter; click any cell to open a side-panel chart
 - **Grid view** — compact 72 × 54 px station cards coloured by worst QC status, grouped by network; click any card to jump to Table view filtered to that station
 - **Map view** — Leaflet map with clustered markers coloured by QC status; coordinates fetched from FDSNWS
-- **History tab** — single-stream chart with presets 1 h / 6 h / 12 h / 24 h / 36 h / 3 d / 7 d / 14 d / 30 d / Custom date range
+- **History tab** — single-stream chart with presets 1 h / 6 h / 12 h / 24 h / 36 h / 3 d / 7 d / 14 d / 30 d / Custom date range; period status bar (% of time ok / warn / alert / no data); CSV export of one stream, all streams, or a per-stream period summary
 - **Overlay tab** — Plotly multi-stream overlay for all streams on a single chart; comma-separated search filter with auto Y-axis rescaling
 - **Heatmap tab** — canvas-based grid (streams × time bins) for pattern detection across all streams
 - **Events log** — detects status transitions on every refresh cycle; browser notifications on alert/recovery
@@ -17,6 +27,36 @@ A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP
 - **Watchlist** — bookmark specific streams; filter to watchlisted streams only
 - **Dark/light theme toggle**
 - **CSV export**
+- **Deep links** — open a specific view from a URL (see below)
+
+---
+
+## Demo mode
+
+`index.html?demo=1` (and any `*.github.io` host, automatically) loads a synthetic dataset from `demo/` instead of the live backend. All stations and networks (XA / XB / XC) are invented. Timestamps are shifted on load so the data always looks current, and custom time ranges are served from the static files, so no backend is needed.
+
+The dataset includes an ongoing station outage, a recovered 8 h outage, a slow telemetry link, a regional delay incident, GPS timing degradation, recurring gaps and a spike burst. Regenerate it with:
+
+```bash
+python3 demo/make_demo_data.py      # no SeisComP installation required
+```
+
+The generator pushes the data through the real backend code (`_rollup_hourly`, `_write_*`), so the files have exactly the live format.
+
+## Deep links
+
+Applied once after the first data load — useful for bookmarks and wall screens:
+
+| URL parameter | Effect |
+|---|---|
+| `view=grid\|map\|history\|overlay\|heatmap\|events` | Open that tab |
+| `stream=NET.STA.LOC.CHA` | With `view=history`: select the stream and load the chart |
+| `param=latency` | Parameter for History / Overlay / Heatmap |
+| `range=6h\|24h\|3d\|7d\|30d` | Preset for all time pickers |
+| `search=!MIRN,BHZ` | Overlay stream filter |
+| `chart=NET.STA.LOC.CHA,latency` | Open the side-panel chart |
+
+Example: `index.html?view=heatmap&param=latency&range=7d`
 
 ---
 
@@ -38,7 +78,7 @@ DEPLOY=/opt/seiscomp/var/run/qclog2
 sudo mkdir -p $DEPLOY
 sudo chown $USER:$USER $DEPLOY
 
-cp backend.py backfill.py run_backend.sh app.js index.html style.css $DEPLOY/
+cp backend.py backfill.py run_backend.sh run_backfill.sh app.js index.html style.css $DEPLOY/
 cp -r vendor/ $DEPLOY/vendor/
 ```
 
@@ -132,15 +172,18 @@ Run `backfill.py` once after first deploy to seed the database with past QC data
 ### Mode A — from the SeisComP database (recommended)
 
 ```bash
-seiscomp-python backfill.py -H localhost --days 7
+seiscomp-python backfill.py -d localhost --days 7
+# or a full connection string: -d mysql://sysop:PASSWORD@localhost/seiscomp
 ```
 
 Options:
 
 | Flag | Description |
 |------|-------------|
-| `-H HOST` | scmaster host (required for database access) |
+| `-d DB` | SeisComP database connection (required for Mode A) |
 | `--days N` | Days of history to import (1–365, default: 7) |
+
+The SeisComP database only holds QC values if scqc archiving is enabled (`archive.interval` ≥ 0).
 
 ### Mode B — from another qclog2 SQLite database
 
@@ -154,7 +197,23 @@ scp mainbox:/opt/seiscomp/var/run/qclog2/qc.db /tmp/qc_import.db
 seiscomp-python backfill.py --source-db /tmp/qc_import.db --days 30
 ```
 
-Backfill regenerates `qc_current.json`, `qc_24h.json`, and `qc_7d.json` when it finishes.
+### Mode C — from a MariaDB CSV export of `WaveformQuality`
+
+```bash
+seiscomp-python backfill.py --source-csv /tmp/wq.csv
+```
+
+The expected column order and the `SELECT … INTO OUTFILE` query are in the `_import_from_csv` docstring.
+
+Backfill writes a backup (`qc.db.bak`) before importing and regenerates all JSON files when it finishes.
+
+### Pruning old QC rows from the SeisComP database
+
+If scqc archiving is on, `WaveformQuality` grows quickly. `strip_db.sh` deletes rows older than N days in batches, together with their matching `Object` rows (and nothing else):
+
+```bash
+bash strip_db.sh 7          # credentials from ~/.my.cnf, or MYSQL_OPTS="-u sysop -p"
+```
 
 ---
 
@@ -184,8 +243,9 @@ scqc → scmaster → backend.py handleMessage()
 - `_write_current()` — latest value + 24-point hourly sparkline per (stream, parameter)
 - `_write_24h()` — 10-minute bins over the last 24 h from `qc_raw`
 - `_write_3d()` — 10-minute bins over the last 3 d from `qc_raw`
-- `_write_7d()` — hourly averages over the last 7 d from `qc_hourly`
-- `_write_30d()` — hourly averages over the last 30 d from `qc_hourly`
+- `_write_7d()` — hourly averages over the last 7 d (`qc_hourly` + recent `qc_raw`, via `_hourly_series()`)
+- `_write_30d()` — hourly averages over the last 30 d (same)
+- `_backup_db()` — daily consistent snapshot to `qc.db.bak` using SQLite's online backup API
 - `_write_health()` — alive check JSON: timestamp, distinct stream count, total message count
 - `_rollup_hourly()` — moves `qc_raw` rows older than `raw_retention_h` into `qc_hourly`, prunes old hourly rows, checkpoints the WAL
 
@@ -214,6 +274,12 @@ Single global state object `S`. No framework, no build step.
 | `gaps_count` | Number of data gaps |
 | `overlaps_count` | Number of overlapping records |
 | `spikes_count` | Number of spikes detected |
+
+When a stream stops, scqc keeps reporting `latency` and `delay` (growing) and `availability` (dropping to 0) through its timeout handling; waveform-based parameters stop arriving and are shown greyed out as stale after 30 minutes.
+
+### scqc load
+
+scqc runs one instance of each plugin per stream, and with the default `report.interval = 60` every stream sends about 12 values per minute to the `QC` group. Load on scqc, scmaster and qclog2 therefore scales linearly with the number of streams. **Monitoring the vertical component only** (the scqc default, `use3Components = false`) is recommended; enabling three components roughly triples CPU, memory, message rate and storage.
 
 ---
 
