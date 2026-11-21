@@ -246,14 +246,20 @@ def _write_24h(db, output_dir):
     )
 
 
-def _write_7d(db, output_dir):
+def _write_7d(db, output_dir, rows=None):
     """
     qc_7d.json — last 7 days at hourly resolution (qc_hourly + recent qc_raw).
+
+    Pass the rows returned by _write_30d() to reuse them: the raw-table part
+    of _hourly_series() is the expensive bit and is identical for both.
     """
     now_ms  = int(time.time() * 1000)
     cutoff  = now_ms - 7 * 24 * 3600 * 1000
 
-    rows = _hourly_series(db, cutoff, now_ms)
+    if rows is None:
+        rows = _hourly_series(db, cutoff, now_ms)
+    else:
+        rows = [r for r in rows if r[2] >= cutoff]
 
     streams = {}
     for stream, param, hour_ms, avg in rows:
@@ -348,6 +354,7 @@ def _write_30d(db, output_dir):
         Path(output_dir) / 'qc_30d.json',
         {'generated': now_ms, 'bin_ms': 3_600_000, 'streams': streams}
     )
+    return rows
 
 
 def _write_health(output_dir, stream_count, msg_count):
@@ -639,8 +646,8 @@ class QCBackend(client.Application):
                 self._last_3d = now
 
             if now - self._last_7d >= 3600:
-                _write_7d(self._db, self._output_dir)
-                _write_30d(self._db, self._output_dir)
+                rows_30d = _write_30d(self._db, self._output_dir)
+                _write_7d(self._db, self._output_dir, rows_30d)
                 self._last_7d = now
 
             if now - self._last_backup >= 86400:
