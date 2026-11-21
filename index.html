@@ -18,6 +18,9 @@
     <div class="hdr-left">
       <span class="app-name">QC Log</span>
       <span id="conn-badge" class="badge badge-connecting">Loading…</span>
+      <span id="demo-banner" class="demo-banner" hidden>
+        Synthetic demo data · <a href="https://github.com/comoglu/qclog2" target="_blank" rel="noopener">GitHub</a>
+      </span>
     </div>
     <div class="hdr-center">
       <input id="search" type="search" placeholder="Search stream / station…" autocomplete="off">
@@ -125,12 +128,18 @@
                   <option value="offset">Offset</option>
                   <option value="gaps_count">Gaps</option>
                   <option value="overlaps_count">Overlaps</option>
+                  <option value="spikes_count">Spikes</option>
                 </select>
               </label>
               <div class="hist-label">Time range
                 <div id="tpick-history"></div>
               </div>
               <button id="hist-load-btn" class="btn-primary">Load</button>
+              <div class="hist-export-group">
+                <button id="hist-export-btn"     title="Export this stream as time-series CSV" disabled>↓ Stream CSV</button>
+                <button id="hist-export-all-btn" title="Export all streams (long format) as CSV — limited to the network selected in the header, if any" disabled>↓ All Streams</button>
+                <button id="hist-export-sum-btn" title="Export period summary for all streams — limited to the network selected in the header, if any" disabled>↓ Period Summary</button>
+              </div>
             </div>
           </div>
           <div id="history-body">

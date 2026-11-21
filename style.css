@@ -85,6 +85,9 @@ body {
 .badge-live       { background: var(--s-ok-bg);    color: var(--s-ok); }
 .badge-stale      { background: var(--s-warn-bg);  color: var(--s-warn); cursor: help; }
 .badge-error      { background: var(--s-alert-bg); color: var(--s-alert); }
+.demo-banner { font-size: 11px; color: var(--text2); white-space: nowrap; }
+.demo-banner[hidden] { display: none; }
+.demo-banner a { color: var(--accent); }
 
 #search, select {
   padding: 5px 10px; border: 1px solid var(--border2);
@@ -469,6 +472,8 @@ th.sort-active { color: var(--accent); }
 .hist-control-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
 .hist-label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; font-weight: 600; color: var(--text2); }
 #hist-stream { min-width: 190px; }
+.hist-export-group { display: flex; gap: 4px; align-self: flex-end; }
+.hist-export-group button:disabled { opacity: .4; cursor: default; }
 #history-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .hist-stats-bar {
   display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text2);
@@ -476,6 +481,27 @@ th.sort-active { color: var(--accent); }
 }
 .hist-stats-bar strong { color: var(--text); font-family: monospace; }
 .hist-pts { color: var(--text3); }
+/* Period status summary */
+.hist-period-summary {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; background: var(--surface2); border-radius: var(--radius);
+  font-size: 12px;
+}
+.hist-period-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text3); flex-shrink: 0; }
+.hist-period-bar { flex: 1; min-width: 120px; height: 8px; border-radius: 4px; display: flex; overflow: hidden; gap: 1px; }
+.hpb-seg { height: 100%; min-width: 2px; }
+.hpb-seg.qc-ok     { background: var(--s-ok); }
+.hpb-seg.qc-warn   { background: var(--s-warn); }
+.hpb-seg.qc-alert  { background: var(--s-alert); }
+.hpb-seg.qc-nodata { background: var(--border2); }
+.hist-period-legend { display: flex; gap: 10px; flex-shrink: 0; }
+.hpl-item { display: flex; align-items: center; gap: 4px; color: var(--text2); }
+.hpl-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.hpl-dot.qc-ok     { background: var(--s-ok); }
+.hpl-dot.qc-warn   { background: var(--s-warn); }
+.hpl-dot.qc-alert  { background: var(--s-alert); }
+.hpl-dot.qc-nodata { background: var(--border2); }
+
 .hist-data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .hist-data-table th {
   padding: 5px 10px; text-align: left; font-size: 10px; font-weight: 700;

@@ -196,32 +196,36 @@ function initPicker(pickerEl, onApply) {
   });
 }
 
-async function fetchQCRange(from_ms, to_ms, param = null) {
-  let url = `${S.prefs.apiUrl}?from=${from_ms}&to=${to_ms}&_=${Date.now()}`;
-  if (param) url += `&param=${encodeURIComponent(param)}`;
-  const r = await fetch(url);
+async function fetchJSON(url) {
+  const r = await fetch(url + (url.includes('?') ? '&' : '?') + '_=' + Date.now());
   if (!r.ok) throw new Error(r.status);
-  return r.json();
+  const data = await r.json();
+  return DEMO ? demoShift(data) : data;
+}
+
+async function fetchQCRange(from_ms, to_ms, param = null) {
+  if (DEMO) {
+    // No backend API in demo mode: serve custom ranges from the static files.
+    const age  = Date.now() - from_ms;
+    const file = age <= 24 * 3_600_000 ? 'qc_24h.json'
+               : age <=  3 * 86_400_000 ? 'qc_3d.json' : 'qc_30d.json';
+    return trimRange(await fetchJSON(DEMO_DIR + file), from_ms, to_ms, param);
+  }
+  let url = `${S.prefs.apiUrl}?from=${from_ms}&to=${to_ms}`;
+  if (param) url += `&param=${encodeURIComponent(param)}`;
+  return fetchJSON(url);
 }
 
 function urlForSpan(spanMs) {
-  if (spanMs <= 24 * 3_600_000) return 'qc_24h.json';
-  if (spanMs <= 3 * 86_400_000) return 'qc_3d.json';
-  if (spanMs <= 7 * 86_400_000) return 'qc_7d.json';
-  return 'qc_30d.json';
+  const dir = DEMO ? DEMO_DIR : '';
+  if (spanMs <= 24 * 3_600_000) return dir + 'qc_24h.json';
+  if (spanMs <= 3 * 86_400_000) return dir + 'qc_3d.json';
+  if (spanMs <= 7 * 86_400_000) return dir + 'qc_7d.json';
+  return dir + 'qc_30d.json';
 }
 
-async function fetchRange(pickerEl, param = null) {
-  const sel = pickerEl.querySelector('.tpick-sel');
-  const { from, to } = pickerRange(pickerEl);
-  if (sel.value === 'custom') {
-    return fetchQCRange(from, to, param);
-  }
-  const spanMs = Number(sel.value);
-  const r = await fetch(urlForSpan(spanMs) + '?_=' + Date.now());
-  if (!r.ok) throw new Error(r.status);
-  const data = await r.json();
-  // Trim to exact window; drop other params to reduce memory
+// Trim to exact window; drop other params to reduce memory
+function trimRange(data, from, to, param) {
   for (const sd of Object.values(data.streams || {})) {
     for (const p of Object.keys(sd)) {
       if (param && p !== param) { delete sd[p]; continue; }
@@ -231,6 +235,59 @@ async function fetchRange(pickerEl, param = null) {
   data.from = from;
   data.to   = to;
   return data;
+}
+
+async function fetchRange(pickerEl, param = null) {
+  const sel = pickerEl.querySelector('.tpick-sel');
+  const { from, to } = pickerRange(pickerEl);
+  if (sel.value === 'custom') {
+    return fetchQCRange(from, to, param);
+  }
+  const data = await fetchJSON(urlForSpan(Number(sel.value)));
+  return trimRange(data, from, to, param);
+}
+
+// ══════════════════════════════════════════════════════════
+// DEMO MODE  — synthetic data from demo/, no backend needed.
+// On by default on GitHub Pages, or anywhere with ?demo=1.
+// ══════════════════════════════════════════════════════════
+const DEMO = (() => {
+  const q = new URLSearchParams(location.search);
+  if (q.has('demo')) return q.get('demo') !== '0';
+  return location.hostname.endsWith('github.io');
+})();
+const DEMO_DIR = 'demo/';
+
+// Demo files are a snapshot. Move every timestamp forward so the snapshot's
+// 'generated' time becomes now. The shift is a whole number of 10-minute bins
+// so bin alignment is preserved.
+function demoShift(data) {
+  if (!data?.generated) return data;
+  const BIN = 600_000;
+  const d   = Math.floor((Date.now() - data.generated) / BIN) * BIN;
+  // Values keep their (<10 min) age; only the snapshot time reads as "now"
+  data.generated = Date.now();
+  if (d <= 0) return data;
+  for (const sd of Object.values(data.streams || {})) {
+    for (const entry of Object.values(sd)) {
+      if (Array.isArray(entry)) { for (const pt of entry) pt[0] += d; continue; }
+      if (entry.t != null) entry.t += d;
+      if (entry.spark) for (const pt of entry.spark) pt[0] += d;
+    }
+  }
+  for (const ev of data.events || []) {
+    ev.ts += d;
+    if (ev.resolvedTs != null) ev.resolvedTs += d;
+  }
+  return data;
+}
+
+async function loadDemoEvents() {
+  try {
+    const data   = await fetchJSON(DEMO_DIR + 'events.json');
+    S.events     = data.events || [];
+    S.prevStatus = {};
+  } catch(_) {}
 }
 
 function cellStatus(param, value) {
@@ -267,10 +324,9 @@ let _seq = 0;
 function fetchData() {
   setBadge('connecting');
   const seq = ++_seq;
-  const url = S.prefs.dataUrl + '?_=' + Date.now();
+  const url = DEMO ? DEMO_DIR + 'qc_current.json' : S.prefs.dataUrl;
 
-  fetch(url)
-    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  fetchJSON(url)
     .then(data => {
       if (seq !== _seq) return;
       S.data         = data;
@@ -287,6 +343,7 @@ function fetchData() {
         .filter(p => seen.has(p) && PARAMS[p]);
 
       render();
+      if (!_urlStateApplied) { _urlStateApplied = true; applyUrlState(); }
       const ageMs = data.generated ? Date.now() - data.generated : null;
       setBadge(ageMs !== null && ageMs > 5 * 60_000 ? 'stale' : 'live');
       scheduleMain();
@@ -296,6 +353,43 @@ function fetchData() {
       setBadge('error');
       scheduleMain();
     });
+}
+
+// Deep links, applied once after the first data load:
+//   ?view=grid|map|history|overlay|heatmap|events
+//   ?view=history&stream=NET.STA.LOC.CHA&param=latency   (auto-loads the chart)
+//   ?view=overlay&param=delay    ?view=heatmap&param=latency
+//   ?chart=NET.STA.LOC.CHA,latency                       (opens the side panel)
+//   &range=6h|24h|3d|7d|30d   preset for all time pickers
+//   &search=!MIRN,BHZ         overlay stream filter
+let _urlStateApplied = false;
+
+function applyUrlState() {
+  const q     = new URLSearchParams(location.search);
+  const view  = q.get('view');
+  const param = q.get('param');
+  const setSel = (id, val) => {
+    const el = typeof id === 'string' ? document.getElementById(id) : id;
+    if (el && val && [...el.options].some(o => o.value === val)) el.value = val;
+  };
+  if (param) { setSel('hist-param', param); setSel('cmp-param', param); setSel('hm-param', param); }
+  const rm = /^(\d+)([hd])$/.exec(q.get('range') || '');
+  if (rm) {
+    const ms = String(rm[1] * (rm[2] === 'h' ? 3_600_000 : 86_400_000));
+    document.querySelectorAll('.tpick-sel').forEach(sel => setSel(sel, ms));
+  }
+  if (q.get('search')) document.getElementById('cmp-search').value = q.get('search');
+  if (view === 'history' && q.get('stream')) {
+    populateHistStream();
+    setSel('hist-stream', q.get('stream'));
+  }
+  if (view && document.getElementById('view-' + view)) switchView(view);
+  if (view === 'history' && q.get('stream')) loadHistoryChart();
+  const chart = q.get('chart');
+  if (chart && chart.includes(',')) {
+    const [stream, p] = chart.split(',');
+    if (S.data?.streams?.[stream]) openChart(stream, p);
+  }
 }
 
 function scheduleMain() {
@@ -782,13 +876,20 @@ function initMap() {
   }).addTo(_map);
   _markerLayer = L.markerClusterGroup({ maxClusterRadius: 40 }).addTo(_map);
   setTimeout(() => _map.invalidateSize(), 150);
-  if (S.prefs.fdsnws) fetchCoordinates().then(refreshMapMarkers);
+  if (S.prefs.fdsnws || DEMO) fetchCoordinates().then(() => {
+    refreshMapMarkers();
+    const pts = Object.values(S.coordinates);
+    if (DEMO && pts.length) _map.fitBounds(pts, { padding: [30, 30], maxZoom: 7 });
+  });
 }
 
 async function fetchCoordinates() {
-  if (!S.prefs.fdsnws || Object.keys(S.coordinates).length) return;
+  if (Object.keys(S.coordinates).length) return;
+  if (!S.prefs.fdsnws && !DEMO) return;
   try {
-    const url = S.prefs.fdsnws.replace(/\/$/, '') + '/station/1/query?level=station&format=text&nodata=404';
+    // Demo: a static file in FDSNWS station text format
+    const url = DEMO ? DEMO_DIR + 'stations.txt'
+      : S.prefs.fdsnws.replace(/\/$/, '') + '/station/1/query?level=station&format=text&nodata=404';
     const r = await fetch(url);
     if (!r.ok) return;
     const text = await r.text();
@@ -868,13 +969,23 @@ async function loadHistoryChart() {
   }
 }
 
-let _histPlot = null;
+let _histPlot    = null;
+let _histSeries  = null;   // { stream, param, from_ms, to_ms, points }
+let _histAllData = null;   // full JSON from last fetchRange (all streams)
 
 function drawHistoryChart(histData, stream, param, from_ms, to_ms) {
   const raw      = histData.streams?.[stream]?.[param] ?? [];
   const filtered = raw; // API already scopes to requested range
   const wrap     = document.getElementById('history-chart-wrap');
   wrap.innerHTML = '';
+  _histSeries  = null;
+  _histAllData = histData;   // always store full data for bulk exports
+  const exportBtn    = document.getElementById('hist-export-btn');
+  const exportAllBtn = document.getElementById('hist-export-all-btn');
+  const exportSumBtn = document.getElementById('hist-export-sum-btn');
+  if (exportBtn)    exportBtn.disabled    = true;
+  if (exportAllBtn) exportAllBtn.disabled = true;
+  if (exportSumBtn) exportSumBtn.disabled = true;
 
   if (!filtered.length) {
     wrap.innerHTML = '<div class="chart-loading">No data in this time range.</div>';
@@ -951,17 +1062,39 @@ function drawHistoryChart(histData, stream, param, from_ms, to_ms) {
   });
 
   const nonNull = ys.filter(v => v != null);
+  let statsHtml = '';
   if (nonNull.length) {
     const mn = Math.min(...nonNull), mx = Math.max(...nonNull);
     const avg = nonNull.reduce((a, v) => a + v, 0) / nonNull.length;
-    document.getElementById('history-stats').innerHTML =
-      `<div class="hist-stats-bar">
-        <span>min <strong>${pInfo.fmt(mn)}</strong></span>
-        <span>avg <strong>${pInfo.fmt(avg)}</strong></span>
-        <span>max <strong>${pInfo.fmt(mx)}</strong></span>
-        <span class="hist-pts">${nonNull.length} pts · ${fmtRangeLabel(from_ms, to_ms)}</span>
-      </div>`;
+    statsHtml += `<div class="hist-stats-bar">
+      <span>min <strong>${pInfo.fmt(mn)}</strong></span>
+      <span>avg <strong>${pInfo.fmt(avg)}</strong></span>
+      <span>max <strong>${pInfo.fmt(mx)}</strong></span>
+      <span class="hist-pts">${nonNull.length} pts · ${fmtRangeLabel(from_ms, to_ms)}</span>
+    </div>`;
   }
+
+  // Period status breakdown — % time OK / warn / alert / no data
+  if (thr && filtered.length) {
+    const { counts, total } = periodCounts(param, filtered, from_ms, to_ms, histData.bin_ms);
+    const pct   = st => Math.round(counts[st] / total * 100);
+    const bars  = ['ok', 'warn', 'alert', 'nodata'].filter(st => counts[st] > 0);
+    statsHtml += `<div class="hist-period-summary">
+      <span class="hist-period-label">Period status</span>
+      <div class="hist-period-bar">
+        ${bars.map(st =>
+          `<div class="hpb-seg qc-${st}" style="flex:${counts[st]}"
+            title="${st}: ${pct(st)}% (${counts[st]} of ${total} pts)"></div>`
+        ).join('')}
+      </div>
+      <div class="hist-period-legend">
+        ${bars.map(st =>
+          `<span class="hpl-item"><span class="hpl-dot qc-${st}"></span>${st} ${pct(st)}%</span>`
+        ).join('')}
+      </div>
+    </div>`;
+  }
+  document.getElementById('history-stats').innerHTML = statsHtml;
 
   const recent = filtered.slice(-24).reverse();
   document.getElementById('history-table-wrap').innerHTML =
@@ -972,6 +1105,130 @@ function drawHistoryChart(histData, stream, param, from_ms, to_ms) {
         return `<tr><td>${fmtTime(t)}</td><td class="qc-${st}">${pInfo.fmt(v)}</td><td>${st}</td></tr>`;
       }).join('')}</tbody>
     </table>`;
+
+  // Enable all export buttons
+  _histSeries = { stream, param, from_ms, to_ms, points: filtered };
+  if (exportBtn)    exportBtn.disabled    = false;
+  if (exportAllBtn) exportAllBtn.disabled = false;
+  if (exportSumBtn) exportSumBtn.disabled = false;
+}
+
+// Status counts over a period, in time bins. Bins with no data point at all
+// (e.g. a station outage) count as 'nodata', so percentages reflect time,
+// not just the points that happened to arrive.
+function periodCounts(param, points, from_ms, to_ms, bin_ms) {
+  const counts = { ok: 0, warn: 0, alert: 0, nodata: 0, info: 0 };
+  for (const [, v] of points) counts[cellStatus(param, v)]++;
+  const step     = bin_ms || 600_000;
+  const expected = Math.max(0, Math.floor(to_ms / step) - Math.ceil(from_ms / step) + 1);
+  counts.nodata += Math.max(0, expected - points.length);
+  const total = Math.max(expected, points.length) || 1;
+  return { counts, total };
+}
+
+function exportHistoryCSV() {
+  if (!_histSeries) return;
+  const { stream, param, from_ms, to_ms, points } = _histSeries;
+  const pInfo = PARAMS[param] ?? { label: param, unit: '' };
+  const col   = pInfo.label + (pInfo.unit ? '_' + pInfo.unit : '');
+  const header = ['Time_UTC', 'Timestamp_ms', col, 'Status'];
+  const rows   = [header, ...points.map(([t, v]) => [
+    new Date(t).toISOString().replace('T', ' ').slice(0, 19),
+    t,
+    v ?? '',
+    cellStatus(param, v),
+  ])];
+  const safe = stream.replace(/\./g, '_');
+  const name = `qclog2_${safe}_${param}_${new Date(from_ms).toISOString().slice(0,10)}_to_${new Date(to_ms).toISOString().slice(0,10)}.csv`;
+  downloadCSV(rows, name);
+}
+
+function exportAllHistoryCSV() {
+  if (!_histAllData || !_histSeries) return;
+  const { param, from_ms, to_ms } = _histSeries;
+  const pInfo    = PARAMS[param] ?? { label: param, unit: '' };
+  const col      = pInfo.label + (pInfo.unit ? '_' + pInfo.unit : '');
+  const netFilter = S.filter.net;
+
+  const header = ['Stream', 'Network', 'Station', 'Location', 'Channel',
+                  'Time_UTC', 'Timestamp_ms', col, 'Status'];
+  const rows = [header];
+
+  for (const [sid, paramMap] of Object.entries(_histAllData.streams || {}).sort()) {
+    if (netFilter && sid.split('.')[0] !== netFilter) continue;
+    const points = paramMap[param];
+    if (!points?.length) continue;
+    const [net, sta, loc, cha] = sid.split('.');
+    for (const [t, v] of points) {
+      rows.push([
+        sid, net, sta, loc ?? '', cha ?? '',
+        new Date(t).toISOString().replace('T', ' ').slice(0, 19),
+        t,
+        v ?? '',
+        cellStatus(param, v),
+      ]);
+    }
+  }
+
+  const streamCount = new Set(rows.slice(1).map(r => r[0])).size;
+  const netPart = netFilter ? `_${netFilter}` : '';
+  const name = `qclog2_all${netPart}_${param}_${new Date(from_ms).toISOString().slice(0,10)}_to_${new Date(to_ms).toISOString().slice(0,10)}.csv`;
+  downloadCSV(rows, name);
+  console.log(`[qclog2] Exported ${rows.length - 1} rows for ${streamCount} streams`);
+}
+
+function exportPeriodSummaryCSV() {
+  if (!_histAllData || !_histSeries) return;
+  const { param, from_ms, to_ms } = _histSeries;
+  const pInfo     = PARAMS[param] ?? { label: param, unit: '' };
+  const col       = pInfo.label + (pInfo.unit ? '_' + pInfo.unit : '');
+  const netFilter = S.filter.net;
+  const binMs     = _histAllData.bin_ms;
+
+  const header = ['Stream', 'Network', 'Station', 'Location', 'Channel', 'Parameter',
+                  'From_UTC', 'To_UTC', 'Time_bins', 'Data_points',
+                  'Min_' + col, 'Avg_' + col, 'Max_' + col,
+                  'OK_pct', 'Warn_pct', 'Alert_pct', 'NoData_pct'];
+  const rows = [header];
+
+  for (const [sid, paramMap] of Object.entries(_histAllData.streams || {}).sort()) {
+    if (netFilter && sid.split('.')[0] !== netFilter) continue;
+    const points = paramMap[param];
+    if (!points?.length) continue;
+    const [net, sta, loc, cha] = sid.split('.');
+    const vals    = points.map(([,v]) => v);
+    const nonNull = vals.filter(v => v != null);
+
+    const { counts, total } = periodCounts(param, points, from_ms, to_ms, binMs);
+    const pct   = st => (counts[st] / total * 100).toFixed(1);
+
+    const mn  = nonNull.length ? Math.min(...nonNull) : '';
+    const mx  = nonNull.length ? Math.max(...nonNull) : '';
+    const avg = nonNull.length ? nonNull.reduce((a, v) => a + v, 0) / nonNull.length : '';
+
+    rows.push([
+      sid, net, sta, loc ?? '', cha ?? '', param,
+      new Date(from_ms).toISOString().replace('T', ' ').slice(0, 16),
+      new Date(to_ms).toISOString().replace('T', ' ').slice(0, 16),
+      total, points.length,
+      mn !== '' ? mn.toFixed(4) : '',
+      avg !== '' ? avg.toFixed(4) : '',
+      mx !== '' ? mx.toFixed(4) : '',
+      pct('ok'), pct('warn'), pct('alert'), pct('nodata'),
+    ]);
+  }
+
+  const netPart = netFilter ? `_${netFilter}` : '';
+  const name = `qclog2_summary${netPart}_${param}_${new Date(from_ms).toISOString().slice(0,10)}_to_${new Date(to_ms).toISOString().slice(0,10)}.csv`;
+  downloadCSV(rows, name);
+}
+
+function downloadCSV(rows, filename) {
+  const csv  = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a    = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: filename });
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -995,8 +1252,9 @@ function toggleWatchlist(stream) {
 function setBadge(state) {
   const el = document.getElementById('conn-badge');
   el.className   = `badge badge-${state}`;
-  const labels   = { live: 'Live', error: 'Error', stale: 'Stale data', connecting: 'Loading…' };
+  const labels   = { live: DEMO ? 'Demo' : 'Live', error: 'Error', stale: 'Stale data', connecting: 'Loading…' };
   el.textContent = labels[state] ?? 'Loading…';
+  if (DEMO && state === 'live') el.title = 'Demo mode — synthetic data, timestamps shifted to now';
   if (state === 'stale' && S.data?.generated) {
     const ageMin = Math.round((Date.now() - S.data.generated) / 60_000);
     el.title = `qc_current.json is ${ageMin}min old — check backend.py is running`;
@@ -1177,9 +1435,15 @@ function initEvents() {
     if (S.view === 'grid')  renderGrid();
   });
 
-  // History load button
+  // History load + export buttons
   document.getElementById('hist-load-btn')
     ?.addEventListener('click', loadHistoryChart);
+  document.getElementById('hist-export-btn')
+    ?.addEventListener('click', exportHistoryCSV);
+  document.getElementById('hist-export-all-btn')
+    ?.addEventListener('click', exportAllHistoryCSV);
+  document.getElementById('hist-export-sum-btn')
+    ?.addEventListener('click', exportPeriodSummaryCSV);
   document.getElementById('refresh-sel').addEventListener('change', e => {
     S.refreshMs = +e.target.value; savePrefs();
   });
@@ -1297,7 +1561,12 @@ function initEvents() {
 // ══════════════════════════════════════════════════════════
 async function init() {
   loadPrefs();
-  await loadDeploymentConfig();
+  if (DEMO) {
+    await loadDemoEvents();
+    document.getElementById('demo-banner').hidden = false;
+  } else {
+    await loadDeploymentConfig();
+  }
 
   document.body.classList.toggle('dark', S.theme === 'dark');
   document.getElementById('refresh-sel').value = String(S.refreshMs);
@@ -1360,9 +1629,12 @@ function renderEvents() {
   }
   empty.style.display = 'none';
   tbody.innerHTML = S.events.map(ev => {
+    // A change *to* ok is a recovery, not an open condition — it has no duration
     const dur = ev.resolvedTs
       ? fmtSec((ev.resolvedTs - ev.ts) / 1000)
-      : `<em style="color:var(--text3)">active</em>`;
+      : ev.to === 'ok'
+        ? `<span style="color:var(--text3)">—</span>`
+        : `<em style="color:var(--text3)">active</em>`;
     return `<tr>
       <td>${fmtTime(ev.ts)}</td>
       <td class="ev-stream">${esc(ev.stream)}</td>
@@ -1424,8 +1696,18 @@ const NET_COLORS = {
 };
 const NET_COLOR_FALLBACK = '#7f7f7f';
 
+// Networks not listed above get a stable colour from their code, so
+// different networks stay distinguishable instead of all turning grey.
+const NET_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                     '#8c564b', '#e377c2', '#17becf', '#bcbd22'];
+
 function netColor(stream) {
-  return NET_COLORS[stream.split('.')[0]] ?? NET_COLOR_FALLBACK;
+  const net = stream.split('.')[0];
+  if (NET_COLORS[net]) return NET_COLORS[net];
+  if (!net) return NET_COLOR_FALLBACK;
+  let h = 0;
+  for (const ch of net) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return NET_PALETTE[h % NET_PALETTE.length];
 }
 
 let _overlayTraces = [];      // [{ name, color }] — kept for theme-reload check
