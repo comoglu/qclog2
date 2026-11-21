@@ -584,6 +584,10 @@ class QCBackend(client.Application):
         self._json_interval = cfg.get('json_interval', 60)
         self._raw_ret_h     = cfg.get('raw_retention_h', 72)
         self._api_port      = cfg.get('api_port', 8765)
+        # Exit (so systemd restarts us) if no message arrives for this long.
+        # Guards against a silently dead scmaster connection. 0 disables.
+        self._watchdog_s    = float(cfg.get('watchdog_min', 10)) * 60
+        self._last_msg_time = time.time()
 
         self._db            = None
         self._insert_buf    = []       # batch inserts
@@ -602,12 +606,30 @@ class QCBackend(client.Application):
             print(f'[qclog2] DB: {self._db_path}', flush=True)
             print(f'[qclog2] Output: {self._output_dir}', flush=True)
             _start_api(self._db_path, self._api_port)
+            if self._watchdog_s > 0:
+                self._last_msg_time = time.time()
+                self.enableTimer(60)
+                print(f'[qclog2] Watchdog: restart if no messages for '
+                      f'{self._watchdog_s / 60:g} min', flush=True)
             return client.Application.run(self)
         except Exception:
             traceback.print_exc()
             return False
 
+    def handleTimeout(self):
+        """Called every 60 s by the SeisComP event loop (see enableTimer)."""
+        try:
+            idle = time.time() - self._last_msg_time
+            if idle > self._watchdog_s:
+                print(f'[qclog2] WATCHDOG: no QC messages for {idle / 60:.0f} min — '
+                      f'exiting so systemd restarts the service', flush=True)
+                self._flush()
+                self.exit(1)
+        except Exception:
+            traceback.print_exc()
+
     def handleMessage(self, msg):
+        self._last_msg_time = time.time()
         try:
             dm = core.DataMessage.Cast(msg)
             if not dm:

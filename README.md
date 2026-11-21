@@ -100,6 +100,7 @@ Edit `$DEPLOY/config.json`:
 | `fdsnws` | FDSNWS base URL for station coordinates. Use a relative path (e.g. `/fdsnws`) if nginx proxies it; use a full URL only if the service is directly reachable from the browser. | `/fdsnws` |
 | `api_port` | Port for the on-demand HTTP API (used by Custom time-range queries) | `8765` |
 | `api_url` | URL prefix for the HTTP API as seen from the browser | `/api/qc` |
+| `watchdog_min` | Exit (so systemd restarts the service) if no QC message arrives for this many minutes; `0` disables | `10` |
 
 ### 3. Install as a systemd service
 
@@ -296,7 +297,7 @@ scqc runs one instance of each plugin per stream, and with the default `report.i
 }
 ```
 
-You can use this for a watchdog — alert if `ts` is more than a few minutes old:
+It is only rewritten while QC messages arrive, so its age is a direct measure of whether the feed is alive. The backend also has its own watchdog (`watchdog_min`): if messages stop it exits and systemd restarts it, which recovers a silently dropped scmaster connection. If scqc itself has stopped, a restart can't help, so also alert when `ts` gets old — for example:
 
 ```bash
 # Example: cron check every 5 minutes
