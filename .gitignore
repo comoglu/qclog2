@@ -30,3 +30,6 @@ config.json
 # Python
 __pycache__/
 *.pyc
+
+# Local copy of the production scqc config
+/qcbox-scqc.cfg
