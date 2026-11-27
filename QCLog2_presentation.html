@@ -225,29 +225,45 @@ python3 -m http.server 8080
   <aside class="notes">The table refreshes every 60 seconds by default (30 s and 2 min are selectable). Sorting by latency quickly brings the worst streams to the top.</aside>
 </section>
 
-<!-- ─── 9. GRID + MAP ─── -->
+<!-- ─── 9. GRID ─── -->
 <section>
-  <h2>Grid &amp; Map Views</h2>
-  <div class="two" style="align-items:start;">
-    <div class="shot-full">
+  <h2>Grid View</h2>
+  <div class="shot">
+    <ul>
+      <li>One card per station, grouped by network</li>
+      <li>Card colour = worst status over all its streams and parameters</li>
+      <li>Shows the value that caused it</li>
+      <li>Click a card → Table filtered to that station</li>
+    </ul>
+    <div>
       <img src="docs/screenshots/grid.png" alt="Grid view">
-      <p style="font-size:.6em;color:#ccc;text-align:left;margin:.4em 0 0;">
-        <b class="ac">Grid</b> — one card per station showing its worst status and the value that caused it.
-        Click a card to jump to the Table filtered to that station.
-      </p>
-    </div>
-    <div class="shot-full">
-      <img src="docs/screenshots/map.png" alt="Map view">
-      <p style="font-size:.6em;color:#ccc;text-align:left;margin:.4em 0 0;">
-        <b class="ac">Map</b> — Leaflet markers coloured by station status, clustered when zoomed out.
-        Popup shows the station code, status and number of streams. Coordinates come from FDSNWS.
-      </p>
+      <div class="cap">Synthetic demo data · three networks, 16 stations</div>
     </div>
   </div>
-  <aside class="notes">The grid is the morning-check view: red and amber cards stand out immediately. The map shows whether a problem is isolated or regional — for example a shared telemetry path.</aside>
+  <aside class="notes">The grid is the morning-check view: red and amber cards stand out immediately.</aside>
 </section>
 
-<!-- ─── 10. HISTORY ─── -->
+<!-- ─── 10. MAP ─── -->
+<section>
+  <h2>Map View</h2>
+  <div class="shot">
+    <ul>
+      <li>Every station shown, never hidden in a cluster</li>
+      <li>Problems larger and on top</li>
+      <li><b>Needs attention</b>: what is wrong, for how long</li>
+      <li>Colour by status or one parameter</li>
+      <li>Popup with all values and chart links</li>
+      <li>Offline base map by default</li>
+    </ul>
+    <div>
+      <img src="docs/screenshots/map.png" alt="Map view">
+      <div class="cap">XB.SALT has a slow link (warning for 3 h); XA.MIRN is down. Coordinates from FDSNWS</div>
+    </div>
+  </div>
+  <aside class="notes">The map answers "is this one station or a region?" — several stations failing together usually means a shared telemetry path. It follows the same filters and thresholds as the table, and the default base map works without internet access.</aside>
+</section>
+
+<!-- ─── 11. HISTORY ─── -->
 <section>
   <h2>History: Per-stream Charts</h2>
   <div class="shot">
@@ -266,7 +282,7 @@ python3 -m http.server 8080
   <aside class="notes">The period summary export gives a per-stream availability-style report for any time range, which is handy for monthly network reporting.</aside>
 </section>
 
-<!-- ─── 11. OVERLAY ─── -->
+<!-- ─── 12. OVERLAY ─── -->
 <section>
   <h2>Overlay: Multi-stream Comparison</h2>
   <div class="shot">
@@ -285,7 +301,7 @@ python3 -m http.server 8080
   <aside class="notes">Excluding the stations with outages lets the y-axis rescale, and a network-wide event becomes obvious.</aside>
 </section>
 
-<!-- ─── 12. HEATMAP ─── -->
+<!-- ─── 13. HEATMAP ─── -->
 <section>
   <h2>Heatmap View</h2>
   <div class="shot">
@@ -302,7 +318,7 @@ python3 -m http.server 8080
   <aside class="notes">In one picture: an ongoing outage, an 8-hour outage two days ago, a slow link that started recently, and a short regional incident five days ago.</aside>
 </section>
 
-<!-- ─── 13. ALERTING ─── -->
+<!-- ─── 14. ALERTING ─── -->
 <section>
   <h2>Thresholds &amp; Events</h2>
   <div class="shot">
@@ -320,7 +336,7 @@ python3 -m http.server 8080
   <aside class="notes">Events give a timeline during an incident: which streams went to alert and when they recovered. For guaranteed paging you would still use a server-side alerting tool.</aside>
 </section>
 
-<!-- ─── 14. DATA RETENTION ─── -->
+<!-- ─── 15. DATA RETENTION ─── -->
 <section>
   <h2>Data Retention</h2>
   <table class="rtable" style="font-size:.8em;">
@@ -349,7 +365,7 @@ python3 -m http.server 8080
   <aside class="notes">The two tiers keep recent queries fast while keeping 30 days of history compact.</aside>
 </section>
 
-<!-- ─── 15. SUMMARY ─── -->
+<!-- ─── 16. SUMMARY ─── -->
 <section>
   <h2>Summary</h2>
   <div class="cards">
@@ -376,7 +392,7 @@ python3 -m http.server 8080
   <aside class="notes">The question it answers: is my network healthy right now, and was it healthy yesterday — without opening scqcv or querying a database.</aside>
 </section>
 
-<!-- ─── 16. THANK YOU ─── -->
+<!-- ─── 17. THANK YOU ─── -->
 <section data-background="#0d1b2a">
   <h1 style="font-size:2.6em;">Thank you</h1>
   <p style="color:var(--am);font-size:1.15em;margin:.3em 0 1.2em;">Questions &amp; Discussion</p>
