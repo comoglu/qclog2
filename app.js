@@ -94,6 +94,10 @@ const S = {
   events:      [],     // [{ ts, stream, from, to, resolvedTs }]
   prevStatus:  {},     // { stream: status } from last cycle
 
+  // Map view
+  mapColor:   '',          // '' = overall status, else a threshold parameter
+  mapHide:    new Set(),   // statuses hidden on the map
+
   // Prefs (add to existing prefs object at loadPrefs time)
   notifEnabled:  false,
   watchlistOnly: false,
@@ -305,13 +309,14 @@ function cellStatus(param, value) {
   return 'ok';
 }
 
+const STATUS_RANK = { nodata: 4, alert: 3, warn: 2, ok: 1, info: 0 };   // higher = worse
+
 function streamStatus(streamData) {
   // worst status across all threshold-bearing params
   let worst = 'ok';
-  const rank = { nodata: 4, alert: 3, warn: 2, ok: 1, info: 0 };
   for (const [param, entry] of Object.entries(streamData)) {
     const st = cellStatus(param, entry?.v ?? null);
-    if ((rank[st] ?? 0) > (rank[worst] ?? 0)) worst = st;
+    if ((STATUS_RANK[st] ?? 0) > (STATUS_RANK[worst] ?? 0)) worst = st;
   }
   return worst;
 }
@@ -379,6 +384,7 @@ function applyUrlState() {
     document.querySelectorAll('.tpick-sel').forEach(sel => setSel(sel, ms));
   }
   if (q.get('search')) document.getElementById('cmp-search').value = q.get('search');
+  if (view === 'map' && param && S.prefs.thresholds[param]) S.mapColor = param;
   if (view === 'history' && q.get('stream')) {
     populateHistStream();
     setSel('hist-stream', q.get('stream'));
@@ -630,11 +636,13 @@ function openChart(stream, param) {
     .forEach(c => c.classList.add('cell-active'));
 
   loadChartData();
+  if (_map && S.view === 'map') setTimeout(() => _map.invalidateSize(), 250);
 }
 
 function closeChart() {
   S.detailStream = null;
   document.getElementById('chart-panel').classList.add('panel-closed');
+  if (_map && S.view === 'map') setTimeout(() => _map.invalidateSize(), 250);
   document.querySelectorAll('.qc-cell.cell-active').forEach(c => c.classList.remove('cell-active'));
   if (S.uplot) { S.uplot.destroy(); S.uplot = null; }
 }
@@ -863,24 +871,260 @@ function buildGridCard(stid, merged, worstSt, streamCount) {
 // ══════════════════════════════════════════════════════════
 // MAP VIEW
 // ══════════════════════════════════════════════════════════
-let _map = null, _markerLayer = null;
+// Operational map: every station is drawn (no clustering, so a bad station is
+// never hidden inside a cluster), problems on top of healthy ones, with a
+// "needs attention" list next to the map. Colour by overall status or by one
+// threshold parameter.
+let _map = null, _markerLayer = null, _pulseLayer = null;
+let _mapMarkers  = {};       // station key → circleMarker
+let _mapPopupKey = null;     // station whose popup is open (kept across refreshes)
+let _mapFitted   = false;
+const MAP_LABEL_ZOOM = 7;    // permanent station labels from this zoom
+const MAP_RECENT_MS  = 15 * 60_000;   // pulse stations that changed this recently
+const STALE_MS       = 30 * 60_000;   // same rule as the table's stale cells
+const STATUS_COLOR   = { ok: '#16a34a', warn: '#ca8a04', alert: '#dc2626', nodata: '#64748b' };
+const STATUS_LABEL   = { alert: 'Alert', nodata: 'No data', warn: 'Warning', ok: 'OK' };
 
 function initMap() {
   if (_map) return;
   const container = document.getElementById('map');
   if (!container) return;
-  _map = L.map(container, { preferCanvas: true }).setView([20, 10], 2);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    maxZoom: 18,
-  }).addTo(_map);
-  _markerLayer = L.markerClusterGroup({ maxClusterRadius: 40 }).addTo(_map);
-  setTimeout(() => _map.invalidateSize(), 150);
-  if (S.prefs.fdsnws || DEMO) fetchCoordinates().then(() => {
-    refreshMapMarkers();
-    const pts = Object.values(S.coordinates);
-    if (DEMO && pts.length) _map.fitBounds(pts, { padding: [30, 30], maxZoom: 7 });
+  _map = L.map(container, { preferCanvas: true, worldCopyJump: true }).setView([20, 10], 2);
+  _pulseLayer  = L.layerGroup().addTo(_map);
+  _markerLayer = L.layerGroup().addTo(_map);
+  const saved = mapPrefs();
+  setBaseMap(saved.base || DEFAULT_BASE);
+  if (saved.plates) togglePlates(true);
+  document.getElementById('map-base').value = BASE_MAPS[saved.base] ? saved.base : DEFAULT_BASE;
+  document.getElementById('map-plates').checked = !!saved.plates;
+  if (saved?.c && saved?.z != null && !DEMO) { _map.setView(saved.c, saved.z); _mapFitted = true; }
+  _map.on('moveend', () => {
+    const c = _map.getCenter();
+    mapPrefs({ c: [c.lat, c.lng], z: _map.getZoom() });
   });
+  let lastLabels = null;
+  _map.on('zoomend', () => {
+    const labels = _map.getZoom() >= MAP_LABEL_ZOOM;
+    if (labels !== lastLabels) { lastLabels = labels; refreshMapMarkers(); }
+  });
+  _map.on('popupclose', () => { _mapPopupKey = null; });
+  setTimeout(() => _map.invalidateSize(), 150);
+  if (S.prefs.fdsnws || DEMO) fetchCoordinates().then(() => refreshMapMarkers());
+}
+
+// Map view settings in localStorage: centre, zoom, base map, overlays
+function mapPrefs(update) {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem('qclog2-map') || '{}') || {}; } catch(_) {}
+  if (update) {
+    p = { ...p, ...update };
+    try { localStorage.setItem('qclog2-map', JSON.stringify(p)); } catch(_) {}
+  }
+  return p;
+}
+
+// Base maps: keyless tile services only (no API key or account to set up).
+// Check each provider's terms for your use: OSM asks heavy users to run their
+// own tile server; Esri tiles are free to view but Esri's terms ask for an
+// ArcGIS account for production use. NASA GIBS and USGS are public.
+const OSM_ATTR  = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const ESRI_ATTR = 'Tiles © Esri';
+const NASA_ATTR = 'Imagery © NASA EOSDIS GIBS';
+const USGS_ATTR = 'Tiles courtesy of the U.S. Geological Survey';
+const esriUrl   = s => `https://server.arcgisonline.com/ArcGIS/rest/services/${s}/MapServer/tile/{z}/{y}/{x}`;
+const gibsUrl   = (layer, ext) => `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer}/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.${ext}`;
+const BASE_MAPS = {
+  osm:        { label: 'OpenStreetMap',            darkFilter: true,  layers: [['https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: OSM_ATTR }]] },
+  openTopo:   { label: 'OpenTopoMap',              darkFilter: true,  layers: [['https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { attribution: '© OpenTopoMap (CC-BY-SA), ' + OSM_ATTR, maxNativeZoom: 17 }]] },
+  blueMarble: { label: 'Blue Marble relief (NASA)', layers: [[gibsUrl('BlueMarble_ShadedRelief_Bathymetry', 'jpeg'), { attribution: NASA_ATTR, maxNativeZoom: 8 }]] },
+  nightLights:{ label: 'Earth at night (NASA)',    layers: [[gibsUrl('VIIRS_CityLights_2012', 'jpg'), { attribution: NASA_ATTR, maxNativeZoom: 8 }]] },
+  usgsTopo:   { label: 'USGS Topo (US)',           layers: [['https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}', { attribution: USGS_ATTR, maxNativeZoom: 16 }]] },
+  esriDark:   { label: 'Dark gray (Esri)',         layers: [[esriUrl('Canvas/World_Dark_Gray_Base'), { attribution: ESRI_ATTR }], [esriUrl('Canvas/World_Dark_Gray_Reference'), {}]] },
+  esriLight:  { label: 'Light gray (Esri)',        layers: [[esriUrl('Canvas/World_Light_Gray_Base'), { attribution: ESRI_ATTR }], [esriUrl('Canvas/World_Light_Gray_Reference'), {}]] },
+  esriOcean:  { label: 'Ocean (Esri)',             layers: [[esriUrl('Ocean/World_Ocean_Base'), { attribution: ESRI_ATTR + ', GEBCO, NOAA' }], [esriUrl('Ocean/World_Ocean_Reference'), {}]] },
+  esriRelief: { label: 'Shaded relief (Esri)',     layers: [[esriUrl('World_Shaded_Relief'), { attribution: ESRI_ATTR, maxNativeZoom: 13 }]] },
+  esriImagery:{ label: 'Satellite (Esri)',         layers: [[esriUrl('World_Imagery'), { attribution: ESRI_ATTR }]] },
+  outline:    { label: 'Outline (offline)',        layers: [] },   // bundled Natural Earth, see outlineLayer()
+};
+const DEFAULT_BASE = 'outline';
+let _baseLayer = null, _platesLayer = null, _outline = null;
+
+function setBaseMap(key) {
+  if (!BASE_MAPS[key]) key = DEFAULT_BASE;
+  const def = BASE_MAPS[key];
+  if (_baseLayer) _map.removeLayer(_baseLayer);
+  _baseLayer = L.layerGroup(def.layers.map(([url, opts]) =>
+    L.tileLayer(url, { maxZoom: 18, subdomains: 'abc', ...opts }))).addTo(_map);
+  const el = document.getElementById('map');
+  // Darken light street maps in the dark theme; the other base maps are left as they are
+  el.classList.toggle('tiles-darken', !!def.darkFilter);
+  el.classList.toggle('map-outline', key === 'outline');
+  const grp = _baseLayer;   // ignore the load if the base map changed meanwhile
+  if (key === 'outline') outlineLayer().then(l => { if (l && _baseLayer === grp) grp.addLayer(l); });
+}
+
+// Offline base map: Natural Earth 1:50m land and borders (public domain),
+// shipped in geo/. Works without internet access. Colours come from CSS so
+// the theme switch restyles it.
+async function outlineLayer() {
+  if (_outline) return _outline;
+  if (!_map.getPane('outline')) _map.createPane('outline').style.zIndex = 150;
+  try {
+    const [land, borders] = await Promise.all([
+      fetchJSON('geo/ne_50m_land.json'), fetchJSON('geo/ne_50m_borders.json')]);
+    const opts = { pane: 'outline', interactive: false, renderer: L.svg({ pane: 'outline' }) };
+    _outline = L.layerGroup([
+      L.geoJSON(land,    { ...opts, attribution: 'Outline: Natural Earth', style: { className: 'ol-land', weight: 0.8 } }),
+      L.geoJSON(borders, { ...opts, style: { className: 'ol-border', weight: 0.6, dashArray: '3 3' } }),
+    ]);
+  } catch(_) { return null; }
+  return _outline;
+}
+
+async function togglePlates(on) {
+  if (!on) { if (_platesLayer) _map.removeLayer(_platesLayer); return; }
+  if (!_platesLayer) {
+    try {
+      const gj = await fetchJSON('geo/PB2002_boundaries.json');
+      _platesLayer = L.geoJSON(gj, { interactive: false,
+        style: { color: '#e11d48', weight: 1.5, opacity: 0.6 },
+        attribution: 'Plate boundaries: Bird (2003), PB2002' });
+    } catch(_) { return; }
+  }
+  _platesLayer.addTo(_map);
+  _platesLayer.bringToBack();
+}
+
+function fitMapToStations(keys) {
+  const pts = keys.map(k => S.coordinates[k]).filter(Boolean);
+  if (pts.length) _map.fitBounds(pts, { padding: [30, 30], maxZoom: 8 });
+}
+
+// Group streams into stations and work out what is wrong with each one.
+// colorBy '' = overall status (worst over all parameters and streams),
+// otherwise the status of that one parameter.
+function mapStations(colorBy) {
+  const stations = {};
+  for (const [sid, sdata] of Object.entries(S.data?.streams || {})) {
+    const p = sid.split('.');
+    const key = p[0] + '.' + p[1];
+    (stations[key] ||= { key, net: p[0], sta: p[1], streams: {} }).streams[sid] = sdata;
+  }
+  const now = Date.now();
+  for (const st of Object.values(stations)) {
+    let status = 'ok', culprits = [], newest = 0;
+    for (const [sid, sdata] of Object.entries(st.streams)) {
+      for (const [param, entry] of Object.entries(sdata)) {
+        if (entry?.t > newest) newest = entry.t;
+        if (colorBy && param !== colorBy) continue;
+        if (!PARAMS[param]) continue;
+        let cs = cellStatus(param, entry?.v ?? null);
+        if (cs === 'info') cs = 'ok';
+        if (STATUS_RANK[cs] > STATUS_RANK[status]) { status = cs; culprits = []; }
+        if (cs === status && cs !== 'ok') culprits.push({ sid, param, v: entry?.v ?? null });
+      }
+    }
+    if (colorBy && !Object.values(st.streams).some(s => s[colorBy])) status = 'nodata';
+    // Report culprits in the order the table shows parameters
+    const order = S.visibleParams;
+    culprits.sort((a, b) => order.indexOf(a.param) - order.indexOf(b.param));
+    const seen = new Set();
+    st.reasons = culprits.filter(c => !seen.has(c.param) && seen.add(c.param))
+      .map(c => c.v == null ? PARAMS[c.param].label : `${PARAMS[c.param].label} ${PARAMS[c.param].fmt(c.v)}`);
+    st.status = status;
+    st.newest = newest || null;
+    st.stale  = newest > 0 && now - newest > STALE_MS;
+    st.watched = Object.keys(st.streams).some(s => S.watchlist.has(s));
+    // When did the current status start? Most recent matching event (S.events is newest first)
+    st.since = null;
+    if (status !== 'ok') {
+      const ev = S.events.find(e => e.to === status && st.streams[e.stream]);
+      if (ev) st.since = ev.ts;
+    }
+  }
+  return stations;
+}
+
+function mapStationVisible(st) {
+  const { net, search, param, status } = S.filter;
+  if (net && st.net !== net) return false;
+  if (search && !st.key.toLowerCase().includes(search.toLowerCase())) return false;
+  if (param && !Object.values(st.streams).some(s => s[param])) return false;
+  if (status && st.status !== status) return false;
+  if (S.watchlistOnly && !st.watched) return false;
+  return true;
+}
+
+function mapReason(st) {
+  if (st.status === 'ok') return st.stale ? 'No recent values' : 'OK';
+  return st.reasons.length ? st.reasons.join(' · ') : STATUS_LABEL[st.status];
+}
+
+function mapPopupHtml(st) {
+  const params = S.visibleParams;
+  const rows = Object.entries(st.streams).sort().map(([sid, sdata]) => {
+    const p = sid.split('.');
+    const chips = params.filter(pr => sdata[pr]).map(pr => {
+      const v = sdata[pr].v ?? null;
+      const cs = cellStatus(pr, v);
+      return `<span class="mp-chip qc-${cs}" title="${esc(pr.replace(/_/g, ' '))}">${PARAMS[pr].label} <b>${esc(PARAMS[pr].fmt(v))}</b></span>`;
+    }).join('');
+    const worst = params.find(pr => sdata[pr] && cellStatus(pr, sdata[pr].v ?? null) === streamStatus(sdata)) || params.find(pr => sdata[pr]);
+    return `<div class="mp-stream">
+      <div class="mp-stream-head"><span class="mp-cha">${esc((p[2] ? p[2] + '.' : '') + (p[3] || ''))}</span>
+        <button class="mp-btn" data-act="chart" data-stream="${esc(sid)}" data-param="${esc(worst || '')}">Chart</button>
+        <button class="mp-btn" data-act="history" data-stream="${esc(sid)}" data-param="${esc(worst || '')}">History</button></div>
+      <div class="mp-chips">${chips}</div></div>`;
+  }).join('');
+  const since = st.since ? ` · for ${fmtSec((Date.now() - st.since) / 1000)}` : '';
+  const age = st.newest ? fmtSec((Date.now() - st.newest) / 1000) + ' ago' : '—';
+  return `<div class="mp">
+    <div class="mp-head"><span class="mp-code">${esc(st.key)}</span>
+      <span class="mp-status qc-${st.status}">${STATUS_LABEL[st.status]}</span></div>
+    <div class="mp-reason">${esc(mapReason(st))}${since}</div>
+    ${rows}
+    <div class="mp-foot">Last value ${esc(age)}${st.stale ? ' <span class="mp-stale">stale</span>' : ''}
+      <button class="mp-btn" data-act="table" data-stid="${esc(st.key)}">Table</button></div>
+  </div>`;
+}
+
+function renderMapSide(all, visible, colorBy) {
+  // Colour-by selector: overall status + every threshold parameter in the data
+  const sel = document.getElementById('map-color');
+  const opts = [['', 'Overall status'],
+    ...S.visibleParams.filter(p => S.prefs.thresholds[p]).map(p => [p, PARAMS[p].label])];
+  const optHtml = opts.map(([v, l]) => `<option value="${v}"${v === colorBy ? ' selected' : ''}>${esc(l)}</option>`).join('');
+  if (sel.innerHTML !== optHtml) sel.innerHTML = optHtml;
+
+  const counts = { alert: 0, nodata: 0, warn: 0, ok: 0 };
+  for (const st of visible) counts[st.status]++;
+  document.getElementById('map-counts').innerHTML = Object.entries(counts).map(([s, n]) =>
+    `<button class="map-count qc-${s}${S.mapHide.has(s) ? ' off' : ''}" data-status="${s}"
+       title="Show/hide ${STATUS_LABEL[s].toLowerCase()} stations on the map">
+       <span class="map-dot" style="background:${STATUS_COLOR[s]}"></span>${n} <span>${STATUS_LABEL[s]}</span></button>`).join('');
+
+  const problems = visible.filter(st => st.status !== 'ok')
+    .sort((a, b) => (STATUS_RANK[b.status] - STATUS_RANK[a.status])
+                 || ((b.since ?? 0) - (a.since ?? 0)) || a.key.localeCompare(b.key));
+  document.getElementById('map-problems-count').textContent = problems.length ? `(${problems.length})` : '';
+  document.getElementById('map-problems').innerHTML = problems.length
+    ? problems.map(st => {
+        const dur = st.since ? fmtSec((Date.now() - st.since) / 1000) : '';
+        const recent = st.since && Date.now() - st.since < MAP_RECENT_MS;
+        return `<div class="map-prob${st.key === _mapPopupKey ? ' sel' : ''}" data-stid="${esc(st.key)}">
+          <span class="map-dot" style="background:${STATUS_COLOR[st.status]}"></span>
+          <span class="map-prob-code">${esc(st.key)}${st.watched ? ' ★' : ''}</span>
+          <span class="map-prob-dur${recent ? ' recent' : ''}" title="${st.since ? 'Since ' + fmtTime(st.since) : 'Start unknown'}">${recent ? 'new' : esc(dur)}</span>
+          <span class="map-prob-why">${esc(mapReason(st))}${S.coordinates[st.key] ? '' : ' · <em>no coordinates</em>'}</span>
+        </div>`;
+      }).join('')
+    : '<div class="map-allok">All stations OK</div>';
+
+  const noCoords = all.filter(st => !S.coordinates[st.key]).length;
+  const hasCoords = Object.keys(S.coordinates).length > 0;
+  document.getElementById('map-foot').textContent = !hasCoords
+    ? (S.prefs.fdsnws || DEMO ? 'Loading station coordinates…' : 'Set an FDSNWS URL in Settings to place stations on the map.')
+    : `${all.length - noCoords} of ${all.length} stations on the map` + (noCoords ? ` · ${noCoords} without coordinates` : '');
 }
 
 async function fetchCoordinates() {
@@ -906,33 +1150,99 @@ async function fetchCoordinates() {
 
 function refreshMapMarkers() {
   if (!_map || !_markerLayer || !S.data) return;
+  const colorBy  = S.mapColor && S.prefs.thresholds[S.mapColor] ? S.mapColor : '';
+  const all      = Object.values(mapStations(colorBy));
+  const visible  = all.filter(mapStationVisible);
+  renderMapSide(all, visible, colorBy);
+
+  const openKey = _mapPopupKey;
   _markerLayer.clearLayers();
-
-  const colMap = { ok: '#16a34a', warn: '#ca8a04', alert: '#dc2626', nodata: '#94a3b8' };
-  const stations = {};
-  for (const [sid, sdata] of Object.entries(S.data.streams || {})) {
-    const parts = sid.split('.');
-    const key = parts[0] + '.' + parts[1];
-    if (!stations[key]) stations[key] = { status: 'ok', streams: 0 };
-    const st = streamStatus(sdata);
-    const rank = { nodata: 4, alert: 3, warn: 2, ok: 1, info: 0 };
-    if ((rank[st] ?? 0) > (rank[stations[key].status] ?? 0)) stations[key].status = st;
-    stations[key].streams++;
-  }
-
-  for (const [key, stData] of Object.entries(stations)) {
-    const coords = S.coordinates[key];
-    if (!coords) continue;
-    const col = colMap[stData.status] ?? '#94a3b8';
-    const icon = L.divIcon({
-      className: '',
-      html: `<span style="display:block;width:10px;height:10px;border-radius:50%;background:${col};border:2px solid rgba(255,255,255,.9);box-shadow:0 1px 4px rgba(0,0,0,.5)"></span>`,
-      iconSize: [10, 10], iconAnchor: [5, 5],
+  _pulseLayer.clearLayers();
+  _mapMarkers = {};
+  const labels = _map.getZoom() >= MAP_LABEL_ZOOM;
+  const now = Date.now();
+  // Draw healthy first so problems are painted on top
+  const drawOrder = visible.filter(st => S.coordinates[st.key] && !S.mapHide.has(st.status))
+    .sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status]);
+  for (const st of drawOrder) {
+    const ll  = S.coordinates[st.key];
+    const col = STATUS_COLOR[st.status];
+    const bad = st.status === 'alert' || st.status === 'nodata';
+    const size = bad ? 20 : st.status === 'warn' ? 17 : 14;
+    const m = L.marker(ll, {
+      icon: stationIcon(col, size, st.stale, st.watched),
+      zIndexOffset: STATUS_RANK[st.status] * 1000,   // problems above healthy stations
+      riseOnHover: true,
     });
-    L.marker(coords, { icon })
-      .bindPopup(`<strong style="font-family:monospace">${esc(key)}</strong><br>Status: <em>${stData.status}</em><br>${stData.streams} stream${stData.streams !== 1 ? 's' : ''} in QC`)
-      .addTo(_markerLayer);
+    m.bindPopup(() => mapPopupHtml(st), { maxWidth: 360, minWidth: 240 });
+    m.on('popupopen', e => {
+      _mapPopupKey = st.key;
+      highlightMapProblem(st.key);
+      // Leaflet stops click propagation in popups, so bind the buttons here
+      e.popup.getElement()?.querySelectorAll('.mp-btn').forEach(b =>
+        b.addEventListener('click', () => mapPopupAction(b.dataset)));
+    });
+    if (labels)
+      m.bindTooltip(esc(st.sta), { permanent: true, direction: 'right', offset: [size / 2, 0], className: 'map-label' });
+    else
+      m.bindTooltip(`<b>${esc(st.key)}</b><br>${esc(mapReason(st))}`, { direction: 'top', offset: [0, -size / 2] });
+    m.addTo(_markerLayer);
+    _mapMarkers[st.key] = m;
+    if (st.status !== 'ok' && st.since && now - st.since < MAP_RECENT_MS)
+      L.marker(ll, { interactive: false, keyboard: false,
+        icon: L.divIcon({ className: 'map-pulse', html: `<span style="--c:${col}"></span>`, iconSize: [36, 36] }) })
+        .addTo(_pulseLayer);
   }
+  if (openKey && _mapMarkers[openKey]) _mapMarkers[openKey].openPopup();
+
+  if (!_mapFitted && Object.keys(S.coordinates).length) {
+    _mapFitted = true;
+    fitMapToStations(all.map(st => st.key));
+  }
+}
+
+// Inverted triangle, the usual seismic station symbol. The point is the station.
+// Stale = faded and dashed; watchlisted = blue outline.
+function stationIcon(col, size, stale, watched) {
+  const w = size, h = Math.round(size * 0.9);
+  const stroke = watched ? '#2563eb' : '#fff';
+  const sw = watched ? 2.5 : 1.5;
+  const svg = `<svg width="${w}" height="${h}" viewBox="0 0 20 18">
+    <path d="M1.5 1.5 H18.5 L10 16.5 Z" fill="${col}" fill-opacity="${stale ? 0.35 : 1}"
+      stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round"${stale ? ' stroke-dasharray="3 2"' : ''}/></svg>`;
+  return L.divIcon({ className: 'sta-tri', html: svg, iconSize: [w, h],
+    iconAnchor: [w / 2, h / 2], popupAnchor: [0, -h / 2], tooltipAnchor: [0, 0] });
+}
+
+function highlightMapProblem(key) {
+  document.querySelectorAll('.map-prob').forEach(el => el.classList.toggle('sel', el.dataset.stid === key));
+}
+
+function focusMapStation(key) {
+  const ll = S.coordinates[key];
+  if (!ll) return;
+  _map.setView(ll, Math.max(_map.getZoom(), MAP_LABEL_ZOOM));   // may redraw (labels)
+  if (!_mapMarkers[key]) { S.mapHide.clear(); refreshMapMarkers(); }   // its status was hidden
+  _mapMarkers[key]?.openPopup();
+}
+
+function mapPopupAction({ act, stream, param, stid }) {
+  if (act === 'table') return showStationInTable(stid);
+  if (!param) return;
+  if (act === 'chart') return openChart(stream, param);
+  populateHistStream();
+  document.getElementById('hist-stream').value = stream;
+  const hp = document.getElementById('hist-param');
+  if ([...hp.options].some(o => o.value === param)) hp.value = param;
+  switchView('history');
+  loadHistoryChart();
+}
+
+function showStationInTable(stid) {
+  const sta = stid.split('.')[1] || stid;
+  S.filter.search = sta;
+  document.getElementById('search').value = sta;
+  switchView('table');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1400,6 +1710,13 @@ function exportCSV() {
 // ══════════════════════════════════════════════════════════
 // EVENT WIRING
 // ══════════════════════════════════════════════════════════
+// Re-render whichever filtered view is showing
+function renderFiltered() {
+  if (S.view === 'table') renderTable();
+  if (S.view === 'grid')  renderGrid();
+  if (S.view === 'map')   refreshMapMarkers();
+}
+
 function initEvents() {
   // Tab switching
   document.querySelectorAll('.tab').forEach(tab =>
@@ -1408,31 +1725,26 @@ function initEvents() {
 
   document.getElementById('search').addEventListener('input', e => {
     S.filter.search = e.target.value.trim();
-    if (S.view === 'table') renderTable();
-    if (S.view === 'grid')  renderGrid();
+    renderFiltered();
   });
   document.getElementById('filter-net').addEventListener('change', e => {
     S.filter.net = e.target.value;
-    if (S.view === 'table') renderTable();
-    if (S.view === 'grid')  renderGrid();
+    renderFiltered();
   });
   document.getElementById('filter-param').addEventListener('change', e => {
     S.filter.param = e.target.value;
-    if (S.view === 'table') renderTable();
-    if (S.view === 'grid')  renderGrid();
+    renderFiltered();
   });
   document.getElementById('filter-status').addEventListener('change', e => {
     S.filter.status = e.target.value;
-    if (S.view === 'table') renderTable();
-    if (S.view === 'grid')  renderGrid();
+    renderFiltered();
   });
   document.getElementById('status-counts').addEventListener('click', e => {
     const sc = e.target.closest('.scount');
     if (!sc) return;
     S.filter.status = S.filter.status === sc.dataset.filter ? '' : sc.dataset.filter;
     document.getElementById('filter-status').value = S.filter.status;
-    if (S.view === 'table') renderTable();
-    if (S.view === 'grid')  renderGrid();
+    renderFiltered();
   });
 
   // History load + export buttons
@@ -1496,12 +1808,39 @@ function initEvents() {
   document.getElementById('grid-wrap').addEventListener('click', e => {
     const card = e.target.closest('.sta-card');
     if (!card) return;
-    const stid = card.dataset.stid;
-    if (!stid) return;
-    const sta = stid.split('.')[1] || stid;
-    S.filter.search = sta;
-    document.getElementById('search').value = sta;
-    switchView('table');
+    if (card.dataset.stid) showStationInTable(card.dataset.stid);
+  });
+
+  // Map view
+  document.getElementById('map-color').addEventListener('change', e => {
+    S.mapColor = e.target.value; refreshMapMarkers();
+  });
+  const baseSel = document.getElementById('map-base');
+  baseSel.innerHTML = Object.entries(BASE_MAPS).map(([k, d]) => `<option value="${k}">${esc(d.label)}</option>`).join('');
+  baseSel.addEventListener('change', e => {
+    mapPrefs({ base: e.target.value });
+    if (_map) setBaseMap(e.target.value);
+  });
+  document.getElementById('map-plates').addEventListener('change', e => {
+    mapPrefs({ plates: e.target.checked });
+    if (_map) togglePlates(e.target.checked);
+  });
+  document.getElementById('map-fit').addEventListener('click', () => {
+    if (!_map || !S.data) return;
+    const keys = Object.values(mapStations(S.mapColor)).filter(mapStationVisible)
+      .filter(st => !S.mapHide.has(st.status)).map(st => st.key);
+    fitMapToStations(keys);
+  });
+  document.getElementById('map-counts').addEventListener('click', e => {
+    const b = e.target.closest('.map-count');
+    if (!b) return;
+    const s = b.dataset.status;
+    S.mapHide.has(s) ? S.mapHide.delete(s) : S.mapHide.add(s);
+    refreshMapMarkers();
+  });
+  document.getElementById('map-problems').addEventListener('click', e => {
+    const row = e.target.closest('.map-prob');
+    if (row) focusMapStation(row.dataset.stid);
   });
 
   // Time pickers — inject HTML then wire each one
@@ -1520,8 +1859,7 @@ function initEvents() {
     S.watchlistOnly = !S.watchlistOnly;
     document.getElementById('watchlist-only-btn').classList.toggle('active', S.watchlistOnly);
     savePrefs();
-    if (S.view === 'table') renderTable();
-    if (S.view === 'grid')  renderGrid();
+    renderFiltered();
   });
 
   // Notification toggle

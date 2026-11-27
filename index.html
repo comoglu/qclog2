@@ -5,8 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>QC Log</title>
   <link rel="stylesheet" href="vendor/leaflet.css">
-  <link rel="stylesheet" href="vendor/MarkerCluster.css">
-  <link rel="stylesheet" href="vendor/MarkerCluster.Default.css">
   <link rel="stylesheet" href="vendor/uplot.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -105,6 +103,21 @@
 
       <!-- MAP VIEW -->
       <section id="view-map" class="view">
+        <aside id="map-side">
+          <div class="map-side-row">
+            <label class="hist-label">Colour by <select id="map-color"></select></label>
+            <button id="map-fit" title="Zoom to the stations shown">Fit</button>
+          </div>
+          <div class="map-side-title">Stations <span class="map-side-hint">click to show/hide</span></div>
+          <div id="map-counts"></div>
+          <div class="map-side-title">Needs attention <span id="map-problems-count"></span></div>
+          <div id="map-problems"></div>
+          <div class="map-side-row map-layers">
+            <label class="hist-label">Base map <select id="map-base"></select></label>
+            <label class="map-check" title="Plate boundaries, PB2002 (Bird, 2003)"><input type="checkbox" id="map-plates"> Plates</label>
+          </div>
+          <div id="map-foot"></div>
+        </aside>
         <div id="map"></div>
       </section>
 
@@ -335,7 +348,6 @@
 </div>
 
 <script src="vendor/leaflet.js"></script>
-<script src="vendor/leaflet.markercluster.js"></script>
 <script src="vendor/uplot.min.js"></script>
 <script src="vendor/plotly.min.js"></script>
 <script src="app.js"></script>

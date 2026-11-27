@@ -18,7 +18,7 @@ A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP
 
 - **Table view** — colour-coded grid of the latest value for every stream × parameter; click any cell to open a side-panel chart
 - **Grid view** — compact 72 × 54 px station cards coloured by worst QC status, grouped by network; click any card to jump to Table view filtered to that station
-- **Map view** — Leaflet map with clustered markers coloured by QC status; coordinates fetched from FDSNWS
+- **Map view** — every station drawn (no clustering, so problems are never hidden), coloured by overall status or by one parameter; a *Needs attention* list with the reason and how long; per-station popup with all values and Chart/History links; recently changed stations pulse; respects the header filters. Base maps: an offline outline (Natural Earth, bundled, the default) or keyless tile services (OpenStreetMap, OpenTopoMap, NASA GIBS, USGS, Esri); optional plate boundaries (PB2002). Coordinates come from FDSNWS
 - **History tab** — single-stream chart with presets 1 h / 6 h / 12 h / 24 h / 36 h / 3 d / 7 d / 14 d / 30 d / Custom date range; period status bar (% of time ok / warn / alert / no data); CSV export of one stream, all streams, or a per-stream period summary
 - **Overlay tab** — Plotly multi-stream overlay for all streams on a single chart; comma-separated search filter with auto Y-axis rescaling
 - **Heatmap tab** — canvas-based grid (streams × time bins) for pattern detection across all streams
@@ -51,7 +51,7 @@ Applied once after the first data load — useful for bookmarks and wall screens
 |---|---|
 | `view=grid\|map\|history\|overlay\|heatmap\|events` | Open that tab |
 | `stream=NET.STA.LOC.CHA` | With `view=history`: select the stream and load the chart |
-| `param=latency` | Parameter for History / Overlay / Heatmap |
+| `param=latency` | Parameter for History / Overlay / Heatmap, or the Map colour |
 | `range=6h\|24h\|3d\|7d\|30d` | Preset for all time pickers |
 | `search=!MIRN,BHZ` | Overlay stream filter |
 | `chart=NET.STA.LOC.CHA,latency` | Open the side-panel chart |
@@ -257,7 +257,7 @@ Single global state object `S`. No framework, no build step.
 - Polls `qc_current.json` on a configurable interval (default 60 s)
 - History/Overlay time-range queries route to the right pre-built JSON file based on the selected span; Custom range queries the on-demand HTTP API
 - Charts rendered with [uPlot](https://github.com/leeoniya/uPlot) (History, side panel) and [Plotly.js](https://plotly.com/javascript/) (Overlay)
-- Map rendered with [Leaflet](https://leafletjs.com/) + [Leaflet.MarkerCluster](https://github.com/Leaflet/Leaflet.markercluster)
+- Map rendered with [Leaflet](https://leafletjs.com/). The default base map is drawn from [Natural Earth](https://www.naturalearthdata.com/) 1:50m land and borders (public domain, `geo/`), so it works without internet access. The tile options need no API key, but check each provider's terms for your use (OpenStreetMap asks heavy users to run their own tile server; Esri's terms ask for an ArcGIS account in production). Plate boundaries: Bird (2003), PB2002 (`geo/PB2002_boundaries.json`)
 - All user preferences (thresholds, watchlist, FDSNWS URL) persisted to `localStorage`
 
 ---
@@ -318,7 +318,6 @@ All vendor libraries are bundled — no CDN dependency.
 | Library | Version | License |
 |---------|---------|---------|
 | [Leaflet](https://leafletjs.com/) | 1.9.x | BSD-2-Clause |
-| [Leaflet.MarkerCluster](https://github.com/Leaflet/Leaflet.markercluster) | 1.5.x | MIT |
 | [uPlot](https://github.com/leeoniya/uPlot) | 1.6.x | MIT |
 | [Plotly.js](https://plotly.com/javascript/) (basic build) | 2.35.2 | MIT |
 
