@@ -164,6 +164,18 @@ seiscomp-python backend.py -H localhost
 bash run_backend.sh -H localhost
 ```
 
+### Frontend smoke test
+
+Run before deploying frontend changes. It serves the repo locally, opens the
+demo in headless Chrome and clicks through every view (table, filters, side
+chart, grid, map, history, overlay, heatmap, events, dark theme). Any
+JavaScript error or a view that doesn't render fails the run (exit code 1).
+
+```bash
+pip install websocket-client          # once; also needs Chrome or Chromium
+python3 tests/smoke_test.py           # add --shots DIR for a screenshot per check
+```
+
 ---
 
 ## Backfilling historical data
