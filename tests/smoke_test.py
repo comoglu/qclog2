@@ -126,7 +126,9 @@ CHECKS = [
     ('side chart', "document.getElementById('filter-net').value='';"
                    "document.getElementById('filter-net').dispatchEvent(new Event('change'));"
                    "document.querySelector('.qc-cell[data-param]').click()",
-     "!!document.querySelector('#chart-wrap .uplot')"),
+     # drawn, and at the full panel width once it has slid open
+     "!!document.querySelector('#chart-wrap .uplot') && S.uplot.width >= "
+     "document.getElementById('chart-wrap').clientWidth - 2"),
     ('future timestamp', "",
      # Negative delay/latency = station clock ahead: a warning, shown with its sign
      "cellStatus('latency', -10) === 'warn' && cellStatus('delay', -10) === 'warn'"

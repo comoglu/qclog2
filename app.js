@@ -1977,12 +1977,18 @@ function initEvents() {
     updateEventsBadge();
   });
 
-  // Resize chart panel when window resizes
-  window.addEventListener('resize', () => {
+  // Resize the side chart with the window, and when the panel has finished
+  // sliding open: data that loads faster than the transition (cached or local)
+  // would otherwise leave the chart at the half-open width
+  const resizeSideChart = () => {
     if (S.uplot && S.detailStream) {
       const wrap = document.getElementById('chart-wrap');
       S.uplot.setSize({ width: wrap.clientWidth, height: 220 });
     }
+  };
+  window.addEventListener('resize', resizeSideChart);
+  document.getElementById('chart-panel').addEventListener('transitionend', e => {
+    if (e.target === e.currentTarget && e.propertyName === 'width') resizeSideChart();
   });
 }
 
