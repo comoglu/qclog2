@@ -882,7 +882,8 @@ let _mapFitted   = false;
 const MAP_LABEL_ZOOM = 7;    // permanent station labels from this zoom
 const MAP_RECENT_MS  = 15 * 60_000;   // pulse stations that changed this recently
 const STALE_MS       = 30 * 60_000;   // same rule as the table's stale cells
-const STATUS_COLOR   = { ok: '#16a34a', warn: '#ca8a04', alert: '#dc2626', nodata: '#64748b' };
+// Colours live in style.css only (one source, follows the theme); OK is muted on the map
+const STATUS_COLOR   = { ok: 'var(--s-ok-map)', warn: 'var(--s-warn)', alert: 'var(--s-alert)', nodata: 'var(--s-nodata)' };
 const STATUS_LABEL   = { alert: 'Alert', nodata: 'No data', warn: 'Warning', ok: 'OK' };
 
 function initMap() {
@@ -1233,7 +1234,7 @@ function refreshMapMarkers() {
     const bad = st.status === 'alert' || st.status === 'nodata';
     const size = bad ? 20 : st.status === 'warn' ? 17 : 14;
     const m = L.marker(ll, {
-      icon: stationIcon(col, size, st.stale, st.watched),
+      icon: stationIcon(col, size, st.stale, st.watched, st.status === 'ok'),
       zIndexOffset: STATUS_RANK[st.status] * 1000,   // problems above healthy stations
       riseOnHover: true,
     });
@@ -1265,15 +1266,22 @@ function refreshMapMarkers() {
 }
 
 // Inverted triangle, the usual seismic station symbol. The point is the station.
-// Stale = faded and dashed; watchlisted = blue outline.
-function stationIcon(col, size, stale, watched) {
+// Stale = faded and dashed; watchlisted = blue outline. Problems get a white
+// edge and a shadow; OK stations a thin dark edge and no shadow (quiet, but
+// still visible on white land or light tiles). col is a CSS colour, so it is
+// set with style (SVG presentation attributes do not resolve var()).
+function stationIcon(col, size, stale, watched, quiet) {
   const w = size, h = Math.round(size * 0.9);
-  const stroke = watched ? '#2563eb' : '#fff';
-  const sw = watched ? 2.5 : 1.5;
-  const svg = `<svg width="${w}" height="${h}" viewBox="0 0 20 18">
-    <path d="M1.5 1.5 H18.5 L10 16.5 Z" fill="${col}" fill-opacity="${stale ? 0.35 : 1}"
-      stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round"${stale ? ' stroke-dasharray="3 2"' : ''}/></svg>`;
-  return L.divIcon({ className: 'sta-tri', html: svg, iconSize: [w, h],
+  const stroke = watched ? '#2563eb' : quiet ? 'var(--s-ok-map-edge)' : '#fff';
+  const sw = watched ? 2.5 : quiet ? 1.2 : 1.5;
+  const tri = 'M1.5 1.5 H18.5 L10 16.5 Z';
+  // OK: a light halo under the dark edge, so it shows on dark imagery as well as on white
+  const halo = quiet && !watched
+    ? `<path d="${tri}" fill="none" stroke="rgba(255,255,255,.75)" stroke-width="3.2" stroke-linejoin="round"/>` : '';
+  const svg = `<svg width="${w}" height="${h}" viewBox="0 0 20 18">${halo}
+    <path d="${tri}" style="fill:${col};stroke:${stroke}" fill-opacity="${stale ? 0.35 : 1}"
+      stroke-width="${sw}" stroke-linejoin="round"${stale ? ' stroke-dasharray="3 2"' : ''}/></svg>`;
+  return L.divIcon({ className: 'sta-tri' + (quiet ? ' quiet' : ''), html: svg, iconSize: [w, h],
     iconAnchor: [w / 2, h / 2], popupAnchor: [0, -h / 2], tooltipAnchor: [0, 0] });
 }
 

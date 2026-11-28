@@ -23,6 +23,11 @@
   --s-nodata:  #64748b;
   --s-nodata-bg:#f1f5f9;
   --s-info:    #475569;
+  /* Map: OK stations muted so colour means "something is wrong" (as in
+     slmon2). Mid-tone with a dark edge, so it stays visible on white land,
+     light tiles and dark imagery alike. */
+  --s-ok-map:      #7fa88a;
+  --s-ok-map-edge: rgba(15, 23, 42, .55);
 
   --hdr-h:     52px;
   --sbar-h:    44px;
@@ -526,6 +531,7 @@ th.sort-active { color: var(--accent); }
 
 .sta-tri { background: none; border: none; }
 .sta-tri svg { display: block; overflow: visible; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+.sta-tri.quiet svg { filter: none; }
 .sta-tri:hover svg { transform: scale(1.25); }
 
 /* Pulse for stations whose status changed in the last 15 min */
