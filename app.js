@@ -889,7 +889,9 @@ function initMap() {
   if (_map) return;
   const container = document.getElementById('map');
   if (!container) return;
-  _map = L.map(container, { preferCanvas: true, worldCopyJump: true }).setView([20, 10], 2);
+  // No worldCopyJump: it would jump the view back into -180..180 and leave
+  // behind stations moved past 180° by lonShiftFor()
+  _map = L.map(container, { preferCanvas: true }).setView([20, 10], 2);
   _pulseLayer  = L.layerGroup().addTo(_map);
   _markerLayer = L.layerGroup().addTo(_map);
   const saved = mapPrefs();
@@ -974,11 +976,63 @@ async function outlineLayer() {
       fetchJSON('geo/ne_50m_land.json'), fetchJSON('geo/ne_50m_borders.json')]);
     const opts = { pane: 'outline', interactive: false, renderer: L.svg({ pane: 'outline' }) };
     _outline = L.layerGroup([
-      L.geoJSON(land,    { ...opts, attribution: 'Outline: Natural Earth', style: { className: 'ol-land', weight: 0.8 } }),
-      L.geoJSON(borders, { ...opts, style: { className: 'ol-border', weight: 0.6, dashArray: '3 3' } }),
+      wrappedGeoJSON(land,    { ...opts, attribution: 'Outline: Natural Earth', style: { className: 'ol-land', weight: 0.8 } }),
+      wrappedGeoJSON(borders, { ...opts, style: { className: 'ol-border', weight: 0.6, dashArray: '3 3' } }),
     ]);
   } catch(_) { return null; }
   return _outline;
+}
+
+// ── Antimeridian ─────────────────────────────────────────────────────────────
+// A network across 180° (Aleutians, Fiji, Tonga, Kermadecs) would be split
+// over both edges of the map, and fitting to it would zoom out to the whole
+// world. If the widest longitude gap between stations is more than 180° and
+// not the one across 180°, the stations on one side of it are moved by 360°
+// so the network is drawn in one piece. The outline and plate layers get a
+// copy shifted the same way, so the land under the moved stations is there.
+let _lonShift = null;      // { cut, by }: see lonShiftFor()
+const _geoWrap = [];       // geo layers that get a shifted copy, see wrappedGeoJSON()
+
+// lons: station longitudes in -180..180. Returns null (no shift needed) or
+// { cut, by }: by = +360 moves lon < cut, by = -360 moves lon > cut. The side
+// is chosen so the network's centre stays within -180..180.
+function lonShiftFor(lons) {
+  if (lons.length < 2) return null;
+  const s = [...lons].sort((a, b) => a - b);
+  let gap = s[0] + 360 - s[s.length - 1], i0 = -1;     // start with the gap across 180°
+  for (let i = 1; i < s.length; i++)
+    if (s[i] - s[i - 1] > gap) { gap = s[i] - s[i - 1]; i0 = i; }
+  if (i0 < 0 || gap <= 180) return null;                // already compact, or spread worldwide
+  const cut = (s[i0] + s[i0 - 1]) / 2;
+  const mid = (s[i0] + s[i0 - 1] + 360) / 2;           // centre if the west side moves east
+  return mid <= 180 ? { cut, by: 360 } : { cut, by: -360 };
+}
+
+function shiftLon(lon) {
+  const s = _lonShift;
+  if (!s) return lon;
+  return s.by > 0 ? (lon < s.cut ? lon + 360 : lon) : (lon > s.cut ? lon - 360 : lon);
+}
+
+// A geoJSON layer that also gets a copy of the features on the moved side,
+// shifted by 360°, once _lonShift is known (the geo files and the station
+// coordinates load in either order).
+function wrappedGeoJSON(data, opts) {
+  const e = { group: L.featureGroup([L.geoJSON(data, opts)]), data, opts, done: false };
+  _geoWrap.push(e);
+  addWrapCopy(e);
+  return e.group;
+}
+
+function addWrapCopy(e) {
+  const s = _lonShift;
+  if (!s || e.done) return;
+  e.done = true;
+  const moved = s.by > 0 ? lon => lon < s.cut : lon => lon > s.cut;
+  const anyLon = c => Array.isArray(c) && (typeof c[0] === 'number' ? moved(c[0]) : c.some(anyLon));
+  e.group.addLayer(L.geoJSON(e.data, { ...e.opts, attribution: undefined,
+    filter: f => anyLon(f.geometry?.coordinates),
+    coordsToLatLng: c => L.latLng(c[1], c[0] + s.by) }));
 }
 
 async function togglePlates(on) {
@@ -986,7 +1040,7 @@ async function togglePlates(on) {
   if (!_platesLayer) {
     try {
       const gj = await fetchJSON('geo/PB2002_boundaries.json');
-      _platesLayer = L.geoJSON(gj, { interactive: false,
+      _platesLayer = wrappedGeoJSON(gj, { interactive: false,
         style: { color: '#e11d48', weight: 1.5, opacity: 0.6 },
         attribution: 'Plate boundaries: Bird (2003), PB2002' });
     } catch(_) { return; }
@@ -1137,14 +1191,23 @@ async function fetchCoordinates() {
     const r = await fetch(url);
     if (!r.ok) return;
     const text = await r.text();
+    const coords = {};
     for (const line of text.split('\n')) {
       if (line.startsWith('#') || !line.trim()) continue;
       const p = line.split('|');
       if (p.length < 4) continue;
       const lat = parseFloat(p[2]), lon = parseFloat(p[3]);
       if (!isNaN(lat) && !isNaN(lon))
-        S.coordinates[p[0].trim() + '.' + p[1].trim()] = [lat, lon];
+        coords[p[0].trim() + '.' + p[1].trim()] = [lat, ((lon + 540) % 360) - 180];
     }
+    // Decide the antimeridian shift on the stations that have QC data (the
+    // inventory may hold far-away stations that are not monitored)
+    const qc = new Set(Object.keys(S.data?.streams || {}).map(sid => sid.split('.').slice(0, 2).join('.')));
+    let lons = Object.entries(coords).filter(([k]) => qc.has(k)).map(([, ll]) => ll[1]);
+    if (!lons.length) lons = Object.values(coords).map(ll => ll[1]);
+    _lonShift = lonShiftFor(lons);
+    for (const [k, [lat, lon]] of Object.entries(coords)) S.coordinates[k] = [lat, shiftLon(lon)];
+    _geoWrap.forEach(addWrapCopy);
   } catch(_) {}
 }
 

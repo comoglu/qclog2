@@ -62,6 +62,9 @@ STATIONS = [
     ('XC', 'BRIM', -27.4, 152.9, 'EH'), ('XC', 'CORM', -30.6, 150.2, 'EH'),
     ('XC', 'FENN', -33.2, 148.7, 'EH'), ('XC', 'HOLT', -35.8, 146.9, 'EH'),
     ('XC', 'LYRE', -37.6, 144.3, 'EH'), ('XC', 'QUAY', -25.1, 149.4, 'EH'),
+    # Across the antimeridian, so the demo exercises the map's 180° handling
+    ('XD', 'KAVU', -17.8, 178.4, 'EH'), ('XD', 'LOMA', -18.6, -178.9, 'EH'),
+    ('XD', 'NUKA', -21.1, -175.2, 'EH'),
 ]
 
 H = 3_600_000

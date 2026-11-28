@@ -18,7 +18,7 @@ A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP
 
 - **Table view** — colour-coded grid of the latest value for every stream × parameter; click any cell to open a side-panel chart
 - **Grid view** — compact 72 × 54 px station cards coloured by worst QC status, grouped by network; click any card to jump to Table view filtered to that station
-- **Map view** — every station drawn (no clustering, so problems are never hidden), coloured by overall status or by one parameter; a *Needs attention* list with the reason and how long; per-station popup with all values and Chart/History links; recently changed stations pulse; respects the header filters. Base maps: an offline outline (Natural Earth, bundled, the default) or keyless tile services (OpenStreetMap, OpenTopoMap, NASA GIBS, USGS, Esri); optional plate boundaries (PB2002). Coordinates come from FDSNWS
+- **Map view** — every station drawn (no clustering, so problems are never hidden), coloured by overall status or by one parameter; a *Needs attention* list with the reason and how long; per-station popup with all values and Chart/History links; recently changed stations pulse; respects the header filters. Base maps: an offline outline (Natural Earth, bundled, the default) or keyless tile services (OpenStreetMap, OpenTopoMap, NASA GIBS, USGS, Esri); optional plate boundaries (PB2002). A network across the 180° meridian (Aleutians, Fiji, Tonga) is drawn in one piece rather than split over both edges of the map. Coordinates come from FDSNWS
 - **History tab** — single-stream chart with presets 1 h / 6 h / 12 h / 24 h / 36 h / 3 d / 7 d / 14 d / 30 d / Custom date range; period status bar (% of time ok / warn / alert / no data); CSV export of one stream, all streams, or a per-stream period summary
 - **Overlay tab** — Plotly multi-stream overlay for all streams on a single chart; comma-separated search filter with auto Y-axis rescaling
 - **Heatmap tab** — canvas-based grid (streams × time bins) for pattern detection across all streams
@@ -33,7 +33,7 @@ A real-time SeisComP QC monitoring dashboard. The backend subscribes to SeisComP
 
 ## Demo mode
 
-`index.html?demo=1` (and any `*.github.io` host, automatically) loads a synthetic dataset from `demo/` instead of the live backend. All stations and networks (XA / XB / XC) are invented. Timestamps are shifted on load so the data always looks current, and custom time ranges are served from the static files, so no backend is needed.
+`index.html?demo=1` (and any `*.github.io` host, automatically) loads a synthetic dataset from `demo/` instead of the live backend. All stations and networks (XA / XB / XC / XD) are invented; XD straddles the 180° meridian to exercise the map. Timestamps are shifted on load so the data always looks current, and custom time ranges are served from the static files, so no backend is needed.
 
 The dataset includes an ongoing station outage, a recovered 8 h outage, a slow telemetry link, a regional delay incident, GPS timing degradation, recurring gaps and a spike burst. Regenerate it with:
 
