@@ -55,8 +55,15 @@ Applied once after the first data load — useful for bookmarks and wall screens
 | `range=6h\|24h\|3d\|7d\|30d` | Preset for all time pickers |
 | `search=!MIRN,BHZ` | Overlay stream filter |
 | `chart=NET.STA.LOC.CHA,latency` | Open the side-panel chart |
+| `net=AK` · `status=alert\|warn\|nodata\|ok` · `q=MIRN` | Header filters: network, status, stream/station search (Table, Grid, Map) |
+| `at=61.2,-150.0,6` | Map centre (lat, lon) and zoom |
+| `base=outline\|osm\|openTopo\|blueMarble\|…` | Map base map |
+| `plates=1\|0` | Map plate boundaries on/off |
+| `hide=ok,warn` | Statuses hidden on the map |
 
 Example: `index.html?view=heatmap&param=latency&range=7d`
+
+The map's **Link** button copies a link to the map exactly as shown (colour, filters, position, base map, plates, hidden statuses), for a colleague, a shift procedure or a second wall screen. A link applies for that visit only: the map settings it carries are not saved over the browser's own (each browser remembers its last centre, zoom, base map and plates).
 
 ---
 

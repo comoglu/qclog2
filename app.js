@@ -97,6 +97,7 @@ const S = {
   // Map view
   mapColor:   '',          // '' = overall status, else a threshold parameter
   mapHide:    new Set(),   // statuses hidden on the map
+  mapLink:    null,        // map settings from the URL: used for this visit, not saved
 
   // Prefs (add to existing prefs object at loadPrefs time)
   notifEnabled:  false,
@@ -404,7 +405,33 @@ function applyUrlState() {
     document.querySelectorAll('.tpick-sel').forEach(sel => setSel(sel, ms));
   }
   if (q.get('search')) document.getElementById('cmp-search').value = q.get('search');
+
+  // Header filters (Table, Grid and Map): net, status, q (search)
+  const nets = new Set(Object.keys(S.data?.streams || {}).map(s => s.split('.')[0]));
+  if (nets.has(q.get('net'))) S.filter.net = q.get('net');
+  if (STATUS_LABEL[q.get('status')]) S.filter.status = q.get('status');
+  if (q.get('q')) S.filter.search = q.get('q').trim();
+  document.getElementById('filter-net').value    = S.filter.net;
+  document.getElementById('filter-status').value = S.filter.status;
+  document.getElementById('search').value        = S.filter.search;
+
+  // Map: colour (param), at=lat,lon,zoom, base, plates=0|1, hide=ok,warn
   if (view === 'map' && param && S.prefs.thresholds[param]) S.mapColor = param;
+  const link = {};
+  const at = (q.get('at') || '').split(',').map(Number);
+  if (at.length === 3 && at.every(Number.isFinite) && Math.abs(at[0]) <= 90)
+    { link.c = [at[0], at[1]]; link.z = Math.min(18, Math.max(1, Math.round(at[2]))); }
+  if (BASE_MAPS[q.get('base')]) link.base = q.get('base');
+  if (q.has('plates')) link.plates = q.get('plates') === '1';
+  if (Object.keys(link).length) S.mapLink = link;
+  for (const h of (q.get('hide') || '').split(',')) if (STATUS_LABEL[h]) S.mapHide.add(h);
+  if (S.mapLink && _map) {   // map was opened before the link was read: apply to it
+    const l = S.mapLink;
+    if (l.base) { setBaseMap(l.base); document.getElementById('map-base').value = l.base; }
+    if (l.plates != null) { togglePlates(l.plates); document.getElementById('map-plates').checked = l.plates; }
+    if (l.c) { _map.setView(l.c, l.z); _mapFitted = true; }
+  }
+  renderFiltered();
   if (view === 'history' && q.get('stream')) {
     populateHistStream();
     setSel('hist-stream', q.get('stream'));
@@ -912,15 +939,21 @@ function initMap() {
   if (!container) return;
   // No worldCopyJump: it would jump the view back into -180..180 and leave
   // behind stations moved past 180° by lonShiftFor()
-  _map = L.map(container, { preferCanvas: true }).setView([20, 10], 2);
+  // A link's settings (see applyUrlState) win over the ones this browser saved.
+  // Create the map at its starting view: moving it right after creation
+  // starts a zoom animation that can swallow the next view change.
+  const saved = { ...mapPrefs(), ...(S.mapLink || {}) };
+  const start = saved.c && saved.z != null && (!DEMO || S.mapLink?.c);
+  _map = L.map(container, { preferCanvas: true })
+    .setView(start ? saved.c : [20, 10], start ? saved.z : 2);
+  if (start) _mapFitted = true;
   _pulseLayer  = L.layerGroup().addTo(_map);
   _markerLayer = L.layerGroup().addTo(_map);
-  const saved = mapPrefs();
-  setBaseMap(saved.base || DEFAULT_BASE);
+  const base  = BASE_MAPS[saved.base] ? saved.base : DEFAULT_BASE;
+  setBaseMap(base);
   if (saved.plates) togglePlates(true);
-  document.getElementById('map-base').value = BASE_MAPS[saved.base] ? saved.base : DEFAULT_BASE;
+  document.getElementById('map-base').value = base;
   document.getElementById('map-plates').checked = !!saved.plates;
-  if (saved?.c && saved?.z != null && !DEMO) { _map.setView(saved.c, saved.z); _mapFitted = true; }
   _map.on('moveend', () => {
     const c = _map.getCenter();
     mapPrefs({ c: [c.lat, c.lng], z: _map.getZoom() });
@@ -935,11 +968,13 @@ function initMap() {
   if (S.prefs.fdsnws || DEMO) fetchCoordinates().then(() => refreshMapMarkers());
 }
 
-// Map view settings in localStorage: centre, zoom, base map, overlays
+// Map view settings in localStorage: centre, zoom, base map, overlays.
+// Not saved during a visit opened from a link with map settings: following a
+// colleague's link must not change this browser's own setup.
 function mapPrefs(update) {
   let p = {};
   try { p = JSON.parse(localStorage.getItem('qclog2-map') || '{}') || {}; } catch(_) {}
-  if (update) {
+  if (update && !S.mapLink) {
     p = { ...p, ...update };
     try { localStorage.setItem('qclog2-map', JSON.stringify(p)); } catch(_) {}
   }
@@ -1304,6 +1339,38 @@ function stationIcon(col, size, stale, watched, quiet) {
       stroke-width="${sw}" stroke-linejoin="round"${stale ? ' stroke-dasharray="3 2"' : ''}/></svg>`;
   return L.divIcon({ className: 'sta-tri' + (quiet ? ' quiet' : ''), html: svg, iconSize: [w, h],
     iconAnchor: [w / 2, h / 2], popupAnchor: [0, -h / 2], tooltipAnchor: [0, 0] });
+}
+
+// Link to the map exactly as shown: view, colour, header filters, centre and
+// zoom, base map, plates, hidden statuses. Opening it applies these for that
+// visit only (see mapPrefs).
+function mapLinkUrl() {
+  const q = new URLSearchParams();
+  if (new URLSearchParams(location.search).has('demo')) q.set('demo', new URLSearchParams(location.search).get('demo'));
+  q.set('view', 'map');
+  if (S.mapColor) q.set('param', S.mapColor);
+  if (S.filter.net)    q.set('net', S.filter.net);
+  if (S.filter.status) q.set('status', S.filter.status);
+  if (S.filter.search) q.set('q', S.filter.search);
+  if (_map) {
+    const c = _map.wrapLatLng(_map.getCenter());
+    q.set('at', [c.lat.toFixed(3), c.lng.toFixed(3), _map.getZoom()].join(','));
+  }
+  q.set('base', document.getElementById('map-base').value);
+  q.set('plates', document.getElementById('map-plates').checked ? '1' : '0');
+  if (S.mapHide.size) q.set('hide', [...S.mapHide].join(','));
+  return location.origin + location.pathname + '?' + q.toString().replace(/%2C/g, ',');
+}
+
+async function copyMapLink(btn) {
+  const url = mapLinkUrl();
+  try {
+    await navigator.clipboard.writeText(url);   // needs https (or localhost)
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Link'; }, 1500);
+  } catch (_) {
+    window.prompt('Copy this link:', url);
+  }
 }
 
 function highlightMapProblem(key) {
@@ -1917,6 +1984,7 @@ function initEvents() {
     mapPrefs({ plates: e.target.checked });
     if (_map) togglePlates(e.target.checked);
   });
+  document.getElementById('map-link').addEventListener('click', e => copyMapLink(e.currentTarget));
   document.getElementById('map-fit').addEventListener('click', () => {
     if (!_map || !S.data) return;
     const keys = Object.values(mapStations(S.mapColor)).filter(mapStationVisible)

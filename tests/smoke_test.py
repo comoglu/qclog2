@@ -96,14 +96,18 @@ class Browser:
         return res.get('result', {}).get('value')
 
     def wait(self, expr, timeout=10):
-        """Poll a JS expression until it is truthy; return its value."""
-        end = time.time() + timeout
+        """Poll a JS expression until it is truthy; return its value. Errors
+        while polling (e.g. the page is still loading) count as not yet."""
+        end, last = time.time() + timeout, ''
         while time.time() < end:
-            v = self.js(expr)
-            if v:
-                return v
+            try:
+                v = self.js(expr)
+                if v:
+                    return v
+            except AssertionError as e:
+                last = f' (last error: {e})'
             time.sleep(0.2)
-        raise AssertionError(f'timed out waiting for: {expr}')
+        raise AssertionError(f'timed out waiting for: {expr}{last}')
 
     def screenshot(self, path):
         data = self.call('Page.captureScreenshot', format='png')['result']['data']
@@ -173,6 +177,25 @@ CHECKS = [
      "document.querySelectorAll('#events-tbody tr').length > 0"),
     ('dark theme', "document.getElementById('theme-toggle').click(); switchView('map')",
      "document.body.classList.contains('dark') && Object.keys(_mapMarkers).length > 0"),
+    ('map link button',
+     "const n=document.getElementById('filter-net'); n.value='XB'; n.dispatchEvent(new Event('change'));"
+     "S.mapHide.clear(); S.mapHide.add('ok'); window._link = mapLinkUrl()",
+     "['view=map', 'net=XB', 'hide=ok', 'at=', 'base=', 'plates='].every(p => _link.includes(p))"),
+    # Last: it reloads the page. The link's settings apply, but are not saved
+    # over the map settings this browser already has.
+    ('map link opens',
+     "localStorage.setItem('qclog2-map', JSON.stringify({ c: [0, 0], z: 3, base: 'outline', plates: false }));"
+     "location.href = location.pathname + '?demo=1&view=map&param=latency&net=XB&hide=ok"
+     "&at=-20.5,134.25,6&base=outline&plates=1'",
+     "S.data && S.view === 'map' && !!_map && S.mapColor === 'latency'"
+     " && S.filter.net === 'XB' && document.getElementById('filter-net').value === 'XB'"
+     " && S.mapHide.has('ok') && _map.getZoom() === 6 && Math.abs(_map.getCenter().lng - 134.25) < 0.01"
+     " && !!_platesLayer && _map.hasLayer(_platesLayer)"
+     " && Object.keys(_mapMarkers).length > 0 && Object.keys(_mapMarkers).every(k => k.startsWith('XB.'))"
+     " && JSON.parse(localStorage.getItem('qclog2-map')).z === 3"),
+    ('map link visit not saved', "_map.setView([-25, 140], 5, { animate: false })",
+     "new Promise(r => setTimeout(r, 300)).then(() => _map.getZoom() === 5"
+     " && JSON.parse(localStorage.getItem('qclog2-map')).z === 3)"),
 ]
 
 
