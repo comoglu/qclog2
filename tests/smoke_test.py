@@ -132,10 +132,12 @@ CHECKS = [
     ('map', "switchView('map')",
      "Object.keys(_mapMarkers).length > 0 && document.querySelectorAll('#map .ol-land').length > 0"),
     ('map antimeridian',
-     # Demo XD stations straddle 180°: drawn in one piece, not across the world
-     "_map.fitBounds(Object.values(S.coordinates), { padding: [30, 30], maxZoom: 8 })",
+     # Demo XD stations straddle 180°: drawn in one piece (station longitudes
+     # within 180° of each other) and the view centred on them, not on 0°
+     "",
      "!!_lonShift && S.coordinates['XD.LOMA'][1] > 180"
-     " && _map.getBounds().getEast() - _map.getBounds().getWest() < 180"
+     " && (l => Math.max(...l) - Math.min(...l) < 180)(Object.values(S.coordinates).map(c => c[1]))"
+     " && _map.getCenter().lng > 100"
      " && lonShiftFor([-150, -160, -135, 173, -176]).by === -360"      # Alaska + Aleutians
      " && lonShiftFor([140, 150, 155]) === null"                        # compact, no shift
      " && lonShiftFor([-120, 0, 120]) === null"),                       # worldwide, no shift
