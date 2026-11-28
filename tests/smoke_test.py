@@ -127,6 +127,13 @@ CHECKS = [
                    "document.getElementById('filter-net').dispatchEvent(new Event('change'));"
                    "document.querySelector('.qc-cell[data-param]').click()",
      "!!document.querySelector('#chart-wrap .uplot')"),
+    ('future timestamp', "",
+     # Negative delay/latency = station clock ahead: a warning, shown with its sign
+     "cellStatus('latency', -10) === 'warn' && cellStatus('delay', -10) === 'warn'"
+     " && cellStatus('latency', -1) !== 'warn' && fmtSec(-90).startsWith('−')"),
+    ('palette', "",
+     # Status colours come from style.css (light-green OK, orange, dark red)
+     "cssVar('--s-ok') === '#86efac' && cssVar('--s-warn') === '#f97316' && cssVar('--s-alert') === '#b91c1c'"),
     ('grid', "closeChart(); switchView('grid')",
      "document.querySelectorAll('.sta-card').length > 0"),
     ('map', "switchView('map')",

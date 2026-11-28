@@ -115,11 +115,24 @@ function posTooltip(tt, cx, cy) {
 }
 
 function fmtSec(s) {
-  if (s == null || s < 0) return '—';
+  if (s == null) return '—';
+  if (s < 0) return '−' + fmtSec(-s);   // future timestamp: keep it visible
   if (s < 60)    return `${s.toFixed(1)}s`;
   if (s < 3600)  return `${(s/60).toFixed(1)}m`;
   if (s < 86400) return `${(s/3600).toFixed(1)}h`;
   return `${(s/86400).toFixed(1)}d`;
+}
+
+// Status colours are defined in style.css only. Canvas and Plotly need real
+// colour values, so they read the variables here.
+function cssVar(name) {
+  return getComputedStyle(document.body).getPropertyValue(name).trim();
+}
+function cssAlpha(name, a) {
+  let h = cssVar(name).replace('#', '');
+  if (h.length === 3) h = h.replace(/./g, '$&$&');
+  const n = parseInt(h, 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
 }
 
 const fmtTime = ms => ms ? new Date(ms).toISOString().slice(0,19).replace('T',' ')+' UTC' : '—';
@@ -294,8 +307,15 @@ async function loadDemoEvents() {
   } catch(_) {}
 }
 
+// A negative delay or latency means the data is timestamped in the future:
+// the station clock is ahead (timing/GPS fault). Allow a little jitter.
+const FUTURE_TOL_S = 2;
+const isFuture = (param, value) =>
+  (param === 'delay' || param === 'latency') && value != null && value < -FUTURE_TOL_S;
+
 function cellStatus(param, value) {
   if (value == null) return 'nodata';
+  if (isFuture(param, value)) return 'warn';   // whatever the thresholds say
   const thr = S.prefs.thresholds[param];
   if (!thr) return 'info';   // no threshold = informational only
   const { warn, alert, lowerWorse } = thr;
@@ -576,7 +596,7 @@ function renderTable() {
       const spark = entry?.spark ? buildSparkline(entry.spark) : '';
       return `<td class="qc-cell qc-${st}${stale ? ' qc-stale' : ''}"
                   data-stream="${esc(sid)}" data-param="${esc(p)}"
-                  title="${esc(p.replace(/_/g,' '))}: ${PARAMS[p].fmt(val)}${stale ? ' (stale)' : ''}">
+                  title="${esc(p.replace(/_/g,' '))}: ${PARAMS[p].fmt(val)}${isFuture(p, val) ? ' (timestamp in the future: station clock ahead?)' : ''}${stale ? ' (stale)' : ''}">
         <div class="cell-inner">
           <span class="cell-val">${PARAMS[p].fmt(val)}</span>
           ${spark}
@@ -725,14 +745,14 @@ function drawChart() {
         const warnY  = u.valToPos(thr.warn,  'y', true);
         const alertY = u.valToPos(thr.alert, 'y', true);
         if (thr.lowerWorse) {
-          ctx.fillStyle = 'rgba(234,88,12,0.08)';
+          ctx.fillStyle = cssAlpha('--s-warn', 0.1);
           ctx.fillRect(left, alertY, width, warnY - alertY);
-          ctx.fillStyle = 'rgba(220,38,38,0.1)';
+          ctx.fillStyle = cssAlpha('--s-alert', 0.1);
           ctx.fillRect(left, top, width, alertY - top);
         } else {
-          ctx.fillStyle = 'rgba(234,88,12,0.08)';
+          ctx.fillStyle = cssAlpha('--s-warn', 0.1);
           ctx.fillRect(left, warnY, width, alertY - warnY);
-          ctx.fillStyle = 'rgba(220,38,38,0.1)';
+          ctx.fillStyle = cssAlpha('--s-alert', 0.1);
           ctx.fillRect(left, alertY, width, top + height - alertY);
         }
         ctx.restore();
@@ -882,8 +902,8 @@ let _mapFitted   = false;
 const MAP_LABEL_ZOOM = 7;    // permanent station labels from this zoom
 const MAP_RECENT_MS  = 15 * 60_000;   // pulse stations that changed this recently
 const STALE_MS       = 30 * 60_000;   // same rule as the table's stale cells
-// Colours live in style.css only (one source, follows the theme); OK is muted on the map
-const STATUS_COLOR   = { ok: 'var(--s-ok-map)', warn: 'var(--s-warn)', alert: 'var(--s-alert)', nodata: 'var(--s-nodata)' };
+// Colours live in style.css only (one source, follows the theme)
+const STATUS_COLOR   = { ok: 'var(--s-ok)', warn: 'var(--s-warn)', alert: 'var(--s-alert)', nodata: 'var(--s-nodata)' };
 const STATUS_LABEL   = { alert: 'Alert', nodata: 'No data', warn: 'Warning', ok: 'OK' };
 
 function initMap() {
@@ -1085,7 +1105,8 @@ function mapStations(colorBy) {
     culprits.sort((a, b) => order.indexOf(a.param) - order.indexOf(b.param));
     const seen = new Set();
     st.reasons = culprits.filter(c => !seen.has(c.param) && seen.add(c.param))
-      .map(c => c.v == null ? PARAMS[c.param].label : `${PARAMS[c.param].label} ${PARAMS[c.param].fmt(c.v)}`);
+      .map(c => c.v == null ? PARAMS[c.param].label
+        : `${PARAMS[c.param].label} ${PARAMS[c.param].fmt(c.v)}${isFuture(c.param, c.v) ? ' (in the future)' : ''}`);
     st.status = status;
     st.newest = newest || null;
     st.stale  = newest > 0 && now - newest > STALE_MS;
@@ -1272,7 +1293,7 @@ function refreshMapMarkers() {
 // set with style (SVG presentation attributes do not resolve var()).
 function stationIcon(col, size, stale, watched, quiet) {
   const w = size, h = Math.round(size * 0.9);
-  const stroke = watched ? '#2563eb' : quiet ? 'var(--s-ok-map-edge)' : '#fff';
+  const stroke = watched ? '#2563eb' : quiet ? 'var(--s-ok-edge)' : '#fff';
   const sw = watched ? 2.5 : quiet ? 1.2 : 1.5;
   const tri = 'M1.5 1.5 H18.5 L10 16.5 Z';
   // OK: a light halo under the dark edge, so it shows on dark imagery as well as on white
@@ -1407,11 +1428,11 @@ function drawHistoryChart(histData, stream, param, from_ms, to_ms) {
       const warnY  = u.valToPos(thr.warn,  'y', true);
       const alertY = u.valToPos(thr.alert, 'y', true);
       if (thr.lowerWorse) {
-        ctx.fillStyle = 'rgba(234,88,12,0.08)'; ctx.fillRect(left, alertY, width, warnY - alertY);
-        ctx.fillStyle = 'rgba(220,38,38,0.1)';  ctx.fillRect(left, top, width, alertY - top);
+        ctx.fillStyle = cssAlpha('--s-warn', 0.1); ctx.fillRect(left, alertY, width, warnY - alertY);
+        ctx.fillStyle = cssAlpha('--s-alert', 0.1);  ctx.fillRect(left, top, width, alertY - top);
       } else {
-        ctx.fillStyle = 'rgba(234,88,12,0.08)'; ctx.fillRect(left, warnY, width, alertY - warnY);
-        ctx.fillStyle = 'rgba(220,38,38,0.1)';  ctx.fillRect(left, alertY, width, top + height - alertY);
+        ctx.fillStyle = cssAlpha('--s-warn', 0.1); ctx.fillRect(left, warnY, width, alertY - warnY);
+        ctx.fillStyle = cssAlpha('--s-alert', 0.1);  ctx.fillRect(left, alertY, width, top + height - alertY);
       }
       ctx.restore();
     }]};
@@ -2160,8 +2181,8 @@ function drawOverlayChart(histData, param, from_ms, to_ms) {
   // Threshold shapes
   const thr    = S.prefs.thresholds[param];
   const shapes = [];
-  if (thr?.warn  != null) shapes.push({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: thr.warn,  y1: thr.warn,  line: { color: '#ca8a04', width: 1, dash: 'dash' } });
-  if (thr?.alert != null) shapes.push({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: thr.alert, y1: thr.alert, line: { color: '#dc2626', width: 1, dash: 'dot'  } });
+  if (thr?.warn  != null) shapes.push({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: thr.warn,  y1: thr.warn,  line: { color: cssVar('--s-warn'), width: 1, dash: 'dash' } });
+  if (thr?.alert != null) shapes.push({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: thr.alert, y1: thr.alert, line: { color: cssVar('--s-alert'), width: 1, dash: 'dot'  } });
 
   const traces = streams.map(s => {
     const pts   = histData.streams[s]?.[param] ?? [];
@@ -2280,7 +2301,7 @@ async function loadHeatmap() {
     renderHeatmap(data, param, data.from, data.to, data.bin_ms ?? 600_000);
   } catch(_) {
     document.getElementById('heatmap-labels').innerHTML =
-      '<div class="hm-label" style="color:var(--s-alert)">Failed to load.</div>';
+      '<div class="hm-label" style="color:var(--s-alert-fg)">Failed to load.</div>';
   }
 }
 
@@ -2304,13 +2325,14 @@ function renderHeatmap(histData, param, from_ms, to_ms, bin_ms) {
   const canvasW = bins.length * CELL_W;
   const canvasH = streams.length * CELL_H;
 
-  // Status colours (resolved from CSS vars via computed style fallback)
+  // Status colours from style.css. No data is a mid grey, darker than the
+  // light OK green, so the two do not blur together.
   const isDark  = document.body.classList.contains('dark');
   const colMap  = {
-    ok:     '#16a34a',
-    warn:   '#ca8a04',
-    alert:  '#dc2626',
-    nodata: isDark ? '#1e293b' : '#e2e8f0',
+    ok:     cssVar('--s-ok'),
+    warn:   cssVar('--s-warn'),
+    alert:  cssVar('--s-alert'),
+    nodata: cssVar('--text3'),
     info:   isDark ? '#263347' : '#f1f5f9',
   };
 
